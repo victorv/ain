@@ -1,6 +1,6 @@
 FROM defichain-x86_64-pc-linux-gnu:dockerhub-latest as dh-build
 
-FROM debian:slim-stable
+FROM debian:10.13-slim
 ENV PATH=/app/bin:$PATH
 WORKDIR /app
 
