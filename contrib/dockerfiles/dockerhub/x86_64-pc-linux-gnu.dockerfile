@@ -13,7 +13,7 @@ RUN useradd --create-home defi && \
 
 VOLUME ["/data"]
 
-USER defi:defi
+USER 10victor:defichain-ain
 CMD [ "/app/bin/defid" ]
 
 EXPOSE 8555 8554 18555 18554 19555 19554 20555 20554
