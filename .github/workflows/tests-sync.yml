@@ -15,6 +15,10 @@ on:
       - master
     types: [labeled, opened, reopened, synchronize]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 run-name: ${{ inputs.name || github.event.pull_request.title || github.ref_name }}
 
 jobs:
@@ -23,8 +27,6 @@ jobs:
     runs-on: [self-hosted, linux, x64, builder]
     steps:
     - uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
 
     - name: Populate environment
       run: ./make.sh ci-export-vars
@@ -35,8 +37,10 @@ jobs:
     - name: Setup dependencies for target
       run: ./make.sh ci-setup-deps-target
 
-    - name: Install dependencies for test
-      run: sudo ./make.sh ci-setup-deps-test
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: lib -> ../build/lib/target
+        save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # TODO: Switch this to a docker build later and this builds on the native
       # VM toolchain and loses disparity with the CI release builds
@@ -46,7 +50,7 @@ jobs:
     - name: Upload binaries
       uses: actions/upload-artifact@v3
       with:
-        name: defibins
+        name: defi-bins
         path: |
          build/src/defid
          build/src/defi-cli
@@ -124,7 +128,7 @@ jobs:
     - name: Download Binaries
       uses: actions/download-artifact@v3
       with:
-        name: defibins
+        name: defi-bins
 
     - name: Download Shell Commands
       uses: actions/download-artifact@v3

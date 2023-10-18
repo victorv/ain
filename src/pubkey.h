@@ -9,6 +9,7 @@
 
 #include <hash.h>
 #include <serialize.h>
+#include <script/standard.h>
 #include <uint256.h>
 
 #include <stdexcept>
@@ -16,12 +17,45 @@
 
 const unsigned int BIP32_EXTKEY_SIZE = 74;
 
+enum class KeyAddressType : uint8_t {
+    DEFAULT, // Uses whatever is set in the pub / priv key
+    COMPRESSED,
+    UNCOMPRESSED
+};
+
 /** A reference to a CKey: the Hash160 of its serialized public key */
 class CKeyID : public uint160
 {
 public:
     CKeyID() : uint160() {}
     explicit CKeyID(const uint160& in) : uint160(in) {}
+    CKeyID(const uint160& in, const KeyAddressType type) : uint160(in), type(type) {}
+
+    KeyAddressType type{KeyAddressType::DEFAULT};
+
+    static std::optional<CKeyID> TryFromDestination(const CTxDestination &dest, KeyType filter=KeyType::AllKeyType) {
+        auto destType = TxDestTypeToKeyType(dest.index()) & filter;
+        switch (destType) {
+            case KeyType::PKHashKeyType:
+                return CKeyID(std::get<PKHash>(dest));
+            case KeyType::WPKHashKeyType:
+                return CKeyID(std::get<WitnessV0KeyHash>(dest));
+            case KeyType::ScriptHashKeyType:
+                return CKeyID(std::get<ScriptHash>(dest));
+            case KeyType::EthHashKeyType:
+                return CKeyID(std::get<WitnessV16EthHash>(dest));
+            default:
+                return {};
+        }
+    }
+
+    static CKeyID FromOrDefaultDestination(const CTxDestination &dest, KeyType filter=KeyType::AllKeyType) {
+        auto key = TryFromDestination(dest, filter);
+        if (key) {
+            return *key;
+        }
+        return {};
+    }
 };
 
 typedef uint256 ChainCode;
@@ -160,7 +194,9 @@ public:
     CKeyID GetEthID() const
     {
         const size_t HEADER_OFFSET{1};
-        return CKeyID(Sha3({vch + HEADER_OFFSET, vch + size()}));
+        auto begin = vch + HEADER_OFFSET;
+        auto end = vch + size();
+        return CKeyID(EthHash160({begin, end}));
     }
 
     //! Get the 256-bit hash of this public key.
@@ -205,11 +241,25 @@ public:
     //! Turn this public key into an uncompressed public key.
     bool Decompress();
 
+    //! Turn this public key into a compressed public key.
+    bool Compress();
+
     //! Derive BIP32 child pubkey.
     bool Derive(CPubKey& pubkeyChild, ChainCode &ccChild, unsigned int nChild, const ChainCode& cc) const;
 
     static bool TryRecoverSigCompat(const std::vector<unsigned char>& vchSig, std::vector<unsigned char>* sig = nullptr);
 };
+
+inline std::pair<CPubKey, CPubKey> GetBothPubkeyCompressions(const CPubKey &key) {
+    auto keyCopy = key;
+    if (key.IsCompressed()) {
+        keyCopy.Decompress();
+        return {keyCopy, key};
+    } else {
+        keyCopy.Compress();
+    }
+    return {key, keyCopy};
+}
 
 struct CExtPubKey {
     unsigned char nDepth;

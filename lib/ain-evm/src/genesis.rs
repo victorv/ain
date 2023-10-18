@@ -1,7 +1,9 @@
-use crate::bytes::Bytes;
+use std::collections::HashMap;
+
 use ethereum_types::{H160, H256, H64, U256};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+
+use crate::bytes::Bytes;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Config {
@@ -33,4 +35,5 @@ pub struct GenesisData {
     pub alloc: Option<HashMap<H160, Alloc>>,
     pub parent_hash: Option<H256>,
     pub mix_hash: Option<H256>,
+    pub base_fee: Option<U256>,
 }

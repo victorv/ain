@@ -11,12 +11,12 @@ from test_framework.util import (
     assert_equal,
 )
 
+TESTSDIR = os.path.dirname(os.path.realpath(__file__))
+
+
 class EVMTest(DefiTestFramework):
     def set_test_params(self):
-        ain = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-        )
-        genesis = os.path.join(ain, "lib/ain-evm/genesis.json")
+        genesis = os.path.join(TESTSDIR, "data/evm-genesis.json")
 
         self.num_nodes = 1
         self.setup_clean_chain = True
@@ -36,7 +36,7 @@ class EVMTest(DefiTestFramework):
                 "-fortcanninggreatworldheight=94",
                 "-fortcanningepilogueheight=96",
                 "-grandcentralheight=101",
-                "-nextnetworkupgradeheight=105",
+                "-metachainheight=105",
                 "-subsidytest=1",
                 "-txindex=1",
             ],

@@ -25,6 +25,8 @@ WitnessV0ScriptHash::WitnessV0ScriptHash(const CScript& in)
     CSHA256().Write(in.data(), in.size()).Finalize(begin());
 }
 
+WitnessV0KeyHash::WitnessV0KeyHash(const CPubKey& pubkey) : uint160(pubkey.GetID()) {}
+
 WitnessV16EthHash::WitnessV16EthHash(const CPubKey& pubkey) : uint160(pubkey.GetEthID()) {}
 
 const char* GetTxnOutputType(txnouttype t)
@@ -60,8 +62,14 @@ static bool MatchPayToPubkey(const CScript& script, valtype& pubkey)
 
 static bool MatchPayToPubkeyHash(const CScript& script, valtype& pubkeyhash)
 {
-    if ((script.size() == 25 && script[0] == OP_DUP && script[1] == OP_HASH160 && script[2] == 20 && script[23] == OP_EQUALVERIFY && script[24] == OP_CHECKSIG) ||
-        (script.size() == 25 && script[0] == OP_DUP && script[1] == OP_SHA3 && script[2] == 20 && script[23] == OP_EQUALVERIFY && script[24] == OP_CHECKSIG)) {
+    auto envelopeCheck = [](const CScript& script) {
+        return (script.size() == 25 && script[0] == OP_DUP && script[2] == 20 && script[23] == OP_EQUALVERIFY && script[24] == OP_CHECKSIG);
+    };
+    auto hashOpCheck = [](const CScript& script) {
+        return (script[1] == OP_HASH160 || script[1] == OP_KECCAK);
+    };
+
+    if (envelopeCheck(script) && hashOpCheck(script)) {
         pubkeyhash = valtype(script.begin () + 3, script.begin() + 23);
         return true;
     }
@@ -250,6 +258,34 @@ bool ExtractDestinations(const CScript& scriptPubKey, txnouttype& typeRet, std::
     return true;
 }
 
+std::optional<CTxDestination> TryFromKeyIDToDestination(const CKeyID &keyId, KeyType keyIdType, KeyType filter) {
+    auto type = keyIdType & filter;
+    switch (type) {
+        case KeyType::PKHashKeyType:
+            return CTxDestination(PKHash(keyId));
+        case KeyType::WPKHashKeyType:
+            return CTxDestination(WitnessV0KeyHash(keyId));
+        case KeyType::ScriptHashKeyType:
+            return CTxDestination(ScriptHash(keyId));
+        case KeyType::EthHashKeyType:
+            return CTxDestination(WitnessV16EthHash(keyId));
+        default:
+            return {};
+    }
+}
+
+CTxDestination FromOrDefaultKeyIDToDestination(const CKeyID &keyId, KeyType keyIdType, KeyType filter) {
+    auto dest = TryFromKeyIDToDestination(keyId, keyIdType, filter);
+    if (dest) {
+        return *dest;
+    }
+    return CTxDestination(CNoDestination());
+}
+
+bool IsValidDestination(const CTxDestination& dest) {
+    return dest.index() != NoDestType;
+}
+
 namespace {
 class CScriptVisitor
 {
@@ -348,8 +384,4 @@ CScript GetScriptForHTLC(const CPubKey& seller, const CPubKey& refund, const std
     script << OP_CHECKSIG;
 
     return script;
-}
-
-bool IsValidDestination(const CTxDestination& dest) {
-    return dest.index() != NoDestType;
 }

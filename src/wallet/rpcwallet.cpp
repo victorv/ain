@@ -9,7 +9,7 @@
 #include <init.h>
 #include <interfaces/chain.h>
 #include <key_io.h>
-#include <masternodes/tokens.h>
+#include <dfi/tokens.h>
 #include <node/transaction.h>
 #include <outputtype.h>
 #include <policy/feerate.h>
@@ -41,7 +41,7 @@
 
 #include <functional>
 
-#include <masternodes/mn_checks.h>
+#include <dfi/mn_checks.h>
 
 static const std::string WALLET_ENDPOINT_BASE = "/wallet/";
 
@@ -207,7 +207,7 @@ static UniValue getnewaddress(const JSONRPCRequest& request)
                 "so payments received with the address will be associated with 'label'.\n",
                 {
                     {"label", RPCArg::Type::STR, /* default */ "\"\"", "The label name for the address to be linked to. It can also be set to the empty string \"\" to represent the default label. The label does not need to exist, it will be created if there is no label by the given name."},
-                    {"address_type", RPCArg::Type::STR, /* default */ "set by -addresstype", R"(The address type to use. Options are "legacy", "p2sh-segwit", "bech32" and "eth".)"},
+                    {"address_type", RPCArg::Type::STR, /* default */ "set by -addresstype", R"(The address type to use. Options are "legacy", "p2sh-segwit", "bech32" and "erc55".)"},
                 },
                 RPCResult{
             "\"address\"    (string) The new defi address\n"
@@ -421,7 +421,7 @@ static UniValue sendtoaddress(const JSONRPCRequest& request)
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
     }
 
-    RejectEthAddress(GetScriptForDestination(dest));
+    RejectErc55Address(GetScriptForDestination(dest));
 
     // Amount
     CTokenAmount const tokenAmount = DecodeAmount(pwallet->chain(), request.params[1], request.params[0].get_str()); // don't support multiple tokens due to "SendMoney()" compatibility
@@ -924,7 +924,7 @@ static UniValue sendmany(const JSONRPCRequest& request)
 
     for (auto const & scriptBalances : recip) {
 
-        RejectEthAddress(scriptBalances.first);
+        RejectErc55Address(scriptBalances.first);
 
         bool fSubtractFeeFromAmount = false;
         for (unsigned int idx = 0; idx < subtractFeeFromAmount.size(); idx++) {
@@ -1131,6 +1131,17 @@ UniValue ListReceived(interfaces::Chain::Lock& locked_chain, CWallet * const pwa
     for (auto item_it = start; item_it != end; ++item_it)
     {
         const CTxDestination& address = item_it->first;
+
+        // Do not display Eth addresses
+        // 
+        // This is ok since it's not allowed on mainnet due as these
+        // will be non-standard TX.
+        // TODO: flag it later to optionally display later.
+
+        if (address.index() == WitV16KeyEthHashType) {
+            continue;
+        }
+
         const std::string& label = item_it->second.name;
         auto it = mapTally.find(address);
         if (it == mapTally.end() && !fIncludeEmpty)
@@ -3680,7 +3691,7 @@ public:
     {
         UniValue obj(UniValue::VOBJ);
         CPubKey pubkey;
-        if (pwallet && pwallet->GetPubKey(CKeyID(id), pubkey)) {
+        if (pwallet && pwallet->GetPubKey(CKeyID(id, KeyAddressType::COMPRESSED), pubkey)) {
             obj.pushKV("pubkey", HexStr(pubkey));
         }
         return obj;
@@ -3704,7 +3715,7 @@ public:
     UniValue operator()(const WitnessV16EthHash& id) const {
         UniValue obj(UniValue::VOBJ);
         CPubKey pubkey;
-        if (pwallet && pwallet->GetPubKey(CKeyID(id), pubkey)) {
+        if (pwallet && pwallet->GetPubKey(CKeyID(id, KeyAddressType::UNCOMPRESSED), pubkey)) {
             obj.pushKV("pubkey", HexStr(pubkey));
         }
         return obj;
@@ -3821,7 +3832,7 @@ UniValue getaddressinfo(const JSONRPCRequest& request)
     }
     ret.pushKV("ischange", pwallet->IsChange(scriptPubKey));
     const CKeyMetadata* meta = nullptr;
-    CKeyID key_id = GetKeyForDestination(*pwallet, dest);
+    CKeyID key_id = GetKeyOrDefaultFromDestination(*pwallet, dest);
     if (!key_id.IsNull()) {
         auto it = pwallet->mapKeyMetadata.find(key_id);
         if (it != pwallet->mapKeyMetadata.end()) {
@@ -4236,6 +4247,102 @@ UniValue walletcreatefundedpsbt(const JSONRPCRequest& request)
     return result;
 }
 
+enum class AddressConversionType {
+    Auto,
+    DVMToEVMAddress,
+    EVMToDVMAddress,
+};
+
+static int AddressConversionTypeCount = 3;
+
+UniValue addressmap(const JSONRPCRequest &request) {
+    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
+    CWallet* const pwallet = wallet.get();
+
+    RPCHelpMan{
+        "addressmap",
+        "Give the equivalent of an address from EVM to DVM and versa\n",
+        {
+            {"input", RPCArg::Type::STR, RPCArg::Optional::NO, "DVM address or EVM address"},
+            {"type", RPCArg::Type::NUM, RPCArg::Optional::NO, "Map types: \n\
+                            1 - Address format: DFI -> ERC55 \n\
+                            2 - Address format: ERC55 -> DFI \n"}
+        },
+        RPCResult{
+            "{\n"
+            "    input :    \"address\",         (string) The input address to be converted\n"
+            "    type :     \"map type\"\n       (numeric) address map type indicator"
+            "    format : { \n"
+            "       bech32: \"address\"\n        (string, optional) output converted address"
+            "       p2pkh:  \"address\"\n        (string, optional) output converted address"
+            "       erc55 : \"address\"\n        ..."
+            "    }]\n"
+            "}\n"
+        },
+        RPCExamples{HelpExampleCli("addressmap", R"('"<address>"' 1)")},
+    }
+        .Check(request);
+
+    auto throwInvalidParam = []() { throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid type parameter")); };
+
+    const std::string input = request.params[0].get_str();
+
+    int typeInt = request.params[1].get_int();
+    if (typeInt < 0 || typeInt >= AddressConversionTypeCount) {
+        throwInvalidParam();
+    }
+
+    CTxDestination dest = DecodeDestination(input);
+
+    // auto infer type
+    if (typeInt == 0) {
+        if (dest.index() == WitV0KeyHashType || dest.index() == PKHashType) {
+            typeInt = 1;
+        } else if (dest.index() == WitV16KeyEthHashType) {
+            typeInt = 2;
+        } else {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Unsupported type or unable to determine conversion type automatically from the input");
+        }
+    }
+
+    const auto type = static_cast<AddressConversionType>(typeInt);
+
+    UniValue format(UniValue::VOBJ);
+    UniValue ret(UniValue::VOBJ);
+    ret.pushKV("input", input);
+    ret.pushKV("type", typeInt);
+
+    switch (type) {
+        case AddressConversionType::DVMToEVMAddress: {
+            if (dest.index() != WitV0KeyHashType && dest.index() != PKHashType) {
+                throwInvalidParam();
+            }
+            CPubKey key = AddrToPubKey(pwallet, input);
+            if (key.IsCompressed()) {
+                key.Decompress();
+            }
+            format.pushKV("erc55", EncodeDestination(WitnessV16EthHash(key)));
+            break;
+        }
+        case AddressConversionType::EVMToDVMAddress: {
+            if (dest.index() != WitV16KeyEthHashType) {
+                throwInvalidParam();
+            }
+            CPubKey key = AddrToPubKey(pwallet, input);
+            if (!key.IsCompressed()) {
+                key.Compress();
+            }
+            format.pushKV("bech32", EncodeDestination(WitnessV0KeyHash(key)));
+            break;
+        }
+        default:
+            throwInvalidParam();
+    }
+
+    ret.pushKV("format", format);
+    return ret;
+}
+
 UniValue abortrescan(const JSONRPCRequest& request); // in rpcdump.cpp
 UniValue dumpprivkey(const JSONRPCRequest& request); // in rpcdump.cpp
 UniValue importprivkey(const JSONRPCRequest& request);
@@ -4255,6 +4362,7 @@ static const CRPCCommand commands[] =
     { "wallet",             "abandontransaction",               &abandontransaction,            {"txid"} },
     { "wallet",             "abortrescan",                      &abortrescan,                   {} },
     { "wallet",             "addmultisigaddress",               &addmultisigaddress,            {"nrequired","keys","label","address_type"} },
+    { "wallet",             "addressmap",                       &addressmap,                    {"input", "type"} },
     { "wallet",             "backupwallet",                     &backupwallet,                  {"destination"} },
     { "wallet",             "bumpfee",                          &bumpfee,                       {"txid", "options"} },
     { "wallet",             "createwallet",                     &createwallet,                  {"wallet_name", "disable_private_keys", "blank", "passphrase", "avoid_reuse"} },

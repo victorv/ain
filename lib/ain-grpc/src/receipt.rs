@@ -1,6 +1,6 @@
-use ain_evm::receipt::Receipt;
+use ain_evm::{log::LogIndex, receipt::Receipt};
 use ethereum::{EIP658ReceiptData, Log};
-use primitive_types::{H160, H256, U256};
+use ethereum_types::{H160, H256, U256};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +35,22 @@ pub struct ReceiptResult {
     pub r#type: String,
 }
 
+impl From<LogIndex> for LogResult {
+    fn from(log: LogIndex) -> Self {
+        Self {
+            address: log.address,
+            topics: log.topics,
+            data: format!("0x{}", hex::encode(log.data)),
+            block_number: log.block_number,
+            block_hash: log.block_hash,
+            transaction_hash: log.transaction_hash,
+            transaction_index: format!("{:#x}", log.transaction_index),
+            log_index: format!("{:#x}", log.log_index),
+            removed: false,
+        }
+    }
+}
+
 impl From<Receipt> for ReceiptResult {
     fn from(b: Receipt) -> Self {
         let data = EIP658ReceiptData::from(b.receipt);
@@ -43,7 +59,7 @@ impl From<Receipt> for ReceiptResult {
             block_number: b.block_number,
             contract_address: b.contract_address,
             cumulative_gas_used: b.cumulative_gas,
-            effective_gas_price: Default::default(),
+            effective_gas_price: b.effective_gas_price,
             from: b.from,
             gas_used: data.used_gas,
             logs: {
@@ -66,7 +82,7 @@ impl From<Receipt> for ReceiptResult {
                             block_hash: b.block_hash,
                             transaction_hash: b.tx_hash,
                             transaction_index: format!("{:#x}", b.tx_index),
-                            log_index: { format!("{:#x}", b.logs_index + log_index) },
+                            log_index: { format!("{:#x}", b.logs_index + log_index) }, // safe since we sub the total number of logs during receipt generation
                             removed: false,
                         },
                     )

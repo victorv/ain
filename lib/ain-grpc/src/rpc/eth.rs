@@ -1,29 +1,37 @@
-use crate::block::{BlockNumber, RpcBlock, RpcFeeHistory};
-use crate::call_request::CallRequest;
-use crate::codegen::types::EthTransactionInfo;
-use ain_evm::bytes::Bytes;
+use std::{convert::Into, str::FromStr, sync::Arc};
 
-use crate::receipt::ReceiptResult;
-use crate::transaction_request::{TransactionMessage, TransactionRequest};
-use crate::utils::{format_h256, format_u256};
 use ain_cpp_imports::get_eth_priv_key;
-use ain_evm::evm::{EthCallArgs, MAX_GAS_PER_BLOCK};
-use ain_evm::executor::TxResponse;
-use ain_evm::handler::Handlers;
-
-use crate::sync::{SyncInfo, SyncState};
-use crate::transaction_log::{GetLogsRequest, LogResult};
-use ain_evm::storage::traits::{BlockStorage, ReceiptStorage, TransactionStorage};
-use ain_evm::transaction::{SignedTx, TransactionError};
+use ain_evm::{
+    bytes::Bytes,
+    core::EthCallArgs,
+    evm::EVMServices,
+    executor::TxResponse,
+    filters::Filter,
+    log::FilterType,
+    storage::traits::{BlockStorage, ReceiptStorage, TransactionStorage},
+    transaction::SignedTx,
+};
 use ethereum::{EnvelopedEncodable, TransactionV2};
-use jsonrpsee::core::{Error, RpcResult};
-use jsonrpsee::proc_macros::rpc;
+use ethereum_types::{H160, H256, U256};
+use jsonrpsee::{
+    core::{Error, RpcResult},
+    proc_macros::rpc,
+};
 use libsecp256k1::SecretKey;
 use log::{debug, trace};
-use primitive_types::{H160, H256, U256};
-use std::convert::Into;
-use std::str::FromStr;
-use std::sync::Arc;
+
+use super::to_jsonrpsee_custom_error;
+use crate::{
+    block::{BlockNumber, RpcBlock, RpcFeeHistory},
+    call_request::CallRequest,
+    codegen::types::EthTransactionInfo,
+    filters::{GetFilterChangesResult, NewFilterRequest},
+    receipt::ReceiptResult,
+    sync::{SyncInfo, SyncState},
+    transaction_log::{GetLogsRequest, LogResult},
+    transaction_request::{TransactionMessage, TransactionRequest},
+    utils::{format_h256, format_u256},
+};
 
 #[rpc(server, client, namespace = "eth")]
 pub trait MetachainRPC {
@@ -91,12 +99,12 @@ pub trait MetachainRPC {
 
     /// Returns the hash of the current block, the seedHash, and the boundary condition to be met ("target").
     #[method(name = "getWork")]
-    fn get_getwork(&self) -> RpcResult<Vec<String>>;
+    fn get_work(&self) -> RpcResult<Vec<String>>;
 
     /// Submits a proof of work solution to the node.
     /// Always returns false
     #[method(name = "submitWork")]
-    fn eth_submitwork(&self, nonce: String, hash: String, digest: String) -> RpcResult<bool>;
+    fn submit_work(&self, nonce: String, hash: String, digest: String) -> RpcResult<bool>;
 
     /// Retrieves the current hash rate of the node.
     /// Always returns 0x0
@@ -106,7 +114,7 @@ pub trait MetachainRPC {
     /// Submit mining hashrate.
     /// Always returns false
     #[method(name = "submitHashrate")]
-    fn eth_submithashrate(&self, hashrate: String, id: String) -> RpcResult<bool>;
+    fn submit_hashrate(&self, hashrate: String, id: String) -> RpcResult<bool>;
 
     // ----------------------------------------
     // Transaction
@@ -121,7 +129,7 @@ pub trait MetachainRPC {
     fn get_transaction_by_block_hash_and_index(
         &self,
         hash: H256,
-        index: usize,
+        index: U256,
     ) -> RpcResult<Option<EthTransactionInfo>>;
 
     /// Retrieves a specific transaction, identified by the block number and transaction index.
@@ -129,7 +137,7 @@ pub trait MetachainRPC {
     fn get_transaction_by_block_number_and_index(
         &self,
         block_number: U256,
-        index: usize,
+        index: U256,
     ) -> RpcResult<Option<EthTransactionInfo>>;
 
     /// Retrieves the list of pending transactions.
@@ -171,18 +179,27 @@ pub trait MetachainRPC {
     ) -> RpcResult<U256>;
 
     // ----------------------------------------
-    // Send
+    // Sign
     // ----------------------------------------
 
-    /// Sends a signed transaction.
-    /// Returns the transaction hash as a hexadecimal string.
-    #[method(name = "sendRawTransaction")]
-    fn send_raw_transaction(&self, tx: &str) -> RpcResult<String>;
+    /// Signs a transaction.
+    /// Retuns a raw transaction as a hexademical string.
+    #[method(name = "signTransaction")]
+    fn sign_transaction(&self, req: TransactionRequest) -> RpcResult<String>;
+
+    // ----------------------------------------
+    // Send
+    // ----------------------------------------
 
     /// Sends a transaction.
     /// Returns the transaction hash as a hexadecimal string.
     #[method(name = "sendTransaction")]
     fn send_transaction(&self, req: TransactionRequest) -> RpcResult<String>;
+
+    /// Sends a signed transaction.
+    /// Returns the transaction hash as a hexadecimal string.
+    #[method(name = "sendRawTransaction")]
+    fn send_raw_transaction(&self, tx: &str) -> RpcResult<String>;
 
     // ----------------------------------------
     // Gas
@@ -204,7 +221,7 @@ pub trait MetachainRPC {
     fn fee_history(
         &self,
         block_count: U256,
-        first_block: U256,
+        first_block: BlockNumber,
         priority_fee_percentile: Vec<usize>,
     ) -> RpcResult<RpcFeeHistory>;
 
@@ -227,48 +244,71 @@ pub trait MetachainRPC {
     #[method(name = "getUncleByBlockHashAndIndex")]
     fn get_uncle_by_block_hash(&self) -> RpcResult<Option<bool>>;
 
+    // ----------------------------------------
+    // Logs and filters
+    // ----------------------------------------
+
     #[method(name = "getLogs")]
     fn get_logs(&self, input: GetLogsRequest) -> RpcResult<Vec<LogResult>>;
+
+    #[method(name = "newFilter")]
+    fn new_filter(&self, input: NewFilterRequest) -> RpcResult<U256>;
+
+    #[method(name = "newBlockFilter")]
+    fn new_block_filter(&self) -> RpcResult<U256>;
+
+    #[method(name = "getFilterChanges")]
+    fn get_filter_changes(&self, filter_id: U256) -> RpcResult<GetFilterChangesResult>;
+
+    #[method(name = "uninstallFilter")]
+    fn uninstall_filter(&self, filter_id: U256) -> RpcResult<bool>;
+
+    #[method(name = "getFilterLogs")]
+    fn get_filter_logs(&self, filter_id: U256) -> RpcResult<Vec<LogResult>>;
+
+    #[method(name = "newPendingTransactionFilter")]
+    fn new_pending_transaction_filter(&self) -> RpcResult<U256>;
 }
 
 pub struct MetachainRPCModule {
-    handler: Arc<Handlers>,
+    handler: Arc<EVMServices>,
 }
 
 impl MetachainRPCModule {
     #[must_use]
-    pub fn new(handler: Arc<Handlers>) -> Self {
+    pub fn new(handler: Arc<EVMServices>) -> Self {
         Self { handler }
     }
 
     fn block_number_to_u256(&self, block_number: Option<BlockNumber>) -> RpcResult<U256> {
         match block_number.unwrap_or_default() {
-            BlockNumber::Hash {
-                hash,
-                ..
-            } => {
-                self.handler
-                    .storage
-                    .get_block_by_hash(&hash)
-                    .map(|block| block.header.number)
+            BlockNumber::Hash { hash, .. } => self.handler.storage.get_block_by_hash(&hash),
+            BlockNumber::Num(n) => self.handler.storage.get_block_by_number(&U256::from(n)),
+            BlockNumber::Earliest => self.handler.storage.get_block_by_number(&U256::zero()),
+            BlockNumber::Safe | BlockNumber::Finalized => {
+                self.handler.storage.get_latest_block().and_then(|block| {
+                    block.map_or(Ok(None), |block| {
+                        let finality_count = self
+                            .handler
+                            .storage
+                            .get_attributes_or_default()?
+                            .finality_count;
+
+                        block
+                            .header
+                            .number
+                            .checked_sub(U256::from(finality_count))
+                            .map_or(Ok(None), |safe_block_number| {
+                                self.handler.storage.get_block_by_number(&safe_block_number)
+                            })
+                    })
+                })
             }
-            BlockNumber::Num(n) => {
-                self.handler
-                    .storage
-                    .get_block_by_number(&U256::from(n))
-                    .map(|block| block.header.number)
-            }
-            _ => {
-                self.handler
-                    .storage
-                    .get_latest_block()
-                    .map(|block| block.header.number)
-            }
-            // BlockNumber::Earliest => todo!(),
             // BlockNumber::Pending => todo!(),
-            // BlockNumber::Safe => todo!(),
-            // BlockNumber::Finalized => todo!(),
+            _ => self.handler.storage.get_latest_block(),
         }
+        .map_err(to_jsonrpsee_custom_error)?
+        .map(|block| block.header.number)
         .ok_or(Error::Custom(String::from("header not found")))
     }
 }
@@ -280,14 +320,29 @@ impl MetachainRPCServer for MetachainRPCModule {
             from,
             to,
             gas,
+            gas_price,
+            max_fee_per_gas,
             value,
             data,
             input,
+            access_list,
+            transaction_type,
             ..
         } = input;
+
+        let max_gas_per_block = self
+            .handler
+            .storage
+            .get_attributes_or_default()
+            .map_err(to_jsonrpsee_custom_error)?
+            .block_gas_limit;
+        let gas_limit = gas
+            .unwrap_or(U256::from(max_gas_per_block))
+            .try_into()
+            .map_err(to_jsonrpsee_custom_error)?;
         let TxResponse { data, .. } = self
             .handler
-            .evm
+            .core
             .call(EthCallArgs {
                 caller: from,
                 to,
@@ -299,11 +354,17 @@ impl MetachainRPCServer for MetachainRPCModule {
                 data: &input
                     .map(|d| d.0)
                     .unwrap_or(data.map(|d| d.0).unwrap_or_default()),
-                gas_limit: gas.unwrap_or(MAX_GAS_PER_BLOCK).as_u64(),
-                access_list: vec![],
+                gas_limit,
+                gas_price,
+                max_fee_per_gas,
+                access_list: access_list.unwrap_or_default(),
                 block_number: self.block_number_to_u256(block_number)?,
+                transaction_type,
             })
-            .map_err(|e| Error::Custom(format!("Error calling EVM : {e:?}")))?;
+            .map_err(|e| {
+                debug!("Error calling EVM : {e:?}");
+                Error::Custom(format!("Error calling EVM : {e:?}"))
+            })?;
         Ok(Bytes(data))
     }
 
@@ -322,9 +383,9 @@ impl MetachainRPCServer for MetachainRPCModule {
         );
         let balance = self
             .handler
-            .evm
+            .core
             .get_balance(address, block_number)
-            .unwrap_or(U256::zero());
+            .map_err(to_jsonrpsee_custom_error)?;
 
         debug!(target:"rpc", "Address: {:?} balance : {} ", address, balance);
         Ok(balance)
@@ -340,9 +401,9 @@ impl MetachainRPCServer for MetachainRPCModule {
 
         let code = self
             .handler
-            .evm
+            .core
             .get_code(address, block_number)
-            .map_err(|e| Error::Custom(format!("Error getting address code : {e:?}")))?;
+            .map_err(to_jsonrpsee_custom_error)?;
 
         match code {
             Some(code) => Ok(format!("0x{}", hex::encode(code))),
@@ -363,9 +424,9 @@ impl MetachainRPCServer for MetachainRPCModule {
         );
 
         self.handler
-            .evm
+            .core
             .get_storage_at(address, position, block_number)
-            .map_err(|e| Error::Custom(format!("get_storage_at error : {e:?}")))?
+            .map_err(to_jsonrpsee_custom_error)?
             .map_or(Ok(H256::default()), |storage| {
                 Ok(H256::from_slice(&storage))
             })
@@ -380,11 +441,11 @@ impl MetachainRPCServer for MetachainRPCModule {
         self.handler
             .storage
             .get_block_by_hash(&hash)
+            .map_err(to_jsonrpsee_custom_error)?
             .map_or(Ok(None), |block| {
-                Ok(Some(RpcBlock::from_block_with_tx_and_base_fee(
+                Ok(Some(RpcBlock::from_block_with_tx(
                     block,
                     full_transactions.unwrap_or_default(),
-                    self.handler.storage.get_base_fee(&hash).unwrap_or_default(),
                 )))
             })
     }
@@ -405,6 +466,7 @@ impl MetachainRPCServer for MetachainRPCModule {
             .handler
             .storage
             .get_latest_block()
+            .map_err(to_jsonrpsee_custom_error)?
             .map(|block| block.header.number)
             .unwrap_or_default();
 
@@ -422,15 +484,11 @@ impl MetachainRPCServer for MetachainRPCModule {
         self.handler
             .storage
             .get_block_by_number(&block_number)
+            .map_err(to_jsonrpsee_custom_error)?
             .map_or(Ok(None), |block| {
-                let tx_hash = &block.header.hash();
-                Ok(Some(RpcBlock::from_block_with_tx_and_base_fee(
+                Ok(Some(RpcBlock::from_block_with_tx(
                     block,
                     full_transactions.unwrap_or_default(),
-                    self.handler
-                        .storage
-                        .get_base_fee(tx_hash)
-                        .unwrap_or_default(),
                 )))
             })
     }
@@ -443,18 +501,24 @@ impl MetachainRPCServer for MetachainRPCModule {
         self.handler
             .storage
             .get_transaction_by_hash(&hash)
+            .map_err(to_jsonrpsee_custom_error)?
             .map_or(Ok(None), |tx| {
-                let mut transaction_info: EthTransactionInfo = tx
-                    .try_into()
-                    .map_err(|e: TransactionError| Error::Custom(e.to_string()))?;
+                let mut transaction_info: EthTransactionInfo =
+                    tx.try_into().map_err(to_jsonrpsee_custom_error)?;
 
                 // TODO: Improve efficiency by indexing the block_hash, block_number, and transaction_index fields.
                 // Temporary workaround: Makes an additional call to get_receipt where these fields are available.
-                if let Some(receipt) = self.handler.storage.get_receipt(&hash) {
+                if let Some(receipt) = self
+                    .handler
+                    .storage
+                    .get_receipt(&hash)
+                    .map_err(to_jsonrpsee_custom_error)?
+                {
                     transaction_info.block_hash = Some(format_h256(receipt.block_hash));
                     transaction_info.block_number = Some(format_u256(receipt.block_number));
                     transaction_info.transaction_index =
                         Some(format_u256(U256::from(receipt.tx_index)));
+                    transaction_info.gas_price = format_u256(receipt.effective_gas_price)
                 }
 
                 Ok(Some(transaction_info))
@@ -465,25 +529,45 @@ impl MetachainRPCServer for MetachainRPCModule {
         ain_cpp_imports::get_pool_transactions()
             .map(|txs| {
                 txs.into_iter()
-                    .flat_map(|tx| EthTransactionInfo::try_from(tx.as_str()))
+                    .flat_map(|tx| EthTransactionInfo::try_from(tx.data.as_str()))
                     .map(EthTransactionInfo::into_pending_transaction_info)
                     .collect()
             })
-            .map_err(|e| Error::Custom(e.to_string()))
+            .map_err(to_jsonrpsee_custom_error)
     }
 
     fn get_transaction_by_block_hash_and_index(
         &self,
         hash: H256,
-        index: usize,
+        index: U256,
     ) -> RpcResult<Option<EthTransactionInfo>> {
         self.handler
             .storage
-            .get_transaction_by_block_hash_and_index(&hash, index)
+            .get_transaction_by_block_hash_and_index(
+                &hash,
+                index.try_into().map_err(to_jsonrpsee_custom_error)?,
+            )
+            .map_err(to_jsonrpsee_custom_error)?
             .map_or(Ok(None), |tx| {
-                let transaction_info = tx
-                    .try_into()
-                    .map_err(|e: TransactionError| Error::Custom(e.to_string()))?;
+                let tx_hash = &tx.hash();
+                let mut transaction_info: EthTransactionInfo =
+                    tx.try_into().map_err(to_jsonrpsee_custom_error)?;
+
+                // TODO: Improve efficiency by indexing the block_hash, block_number, and transaction_index fields.
+                // Temporary workaround: Makes an additional call to get_receipt where these fields are available.
+                if let Some(receipt) = self
+                    .handler
+                    .storage
+                    .get_receipt(tx_hash)
+                    .map_err(to_jsonrpsee_custom_error)?
+                {
+                    transaction_info.block_hash = Some(format_h256(receipt.block_hash));
+                    transaction_info.block_number = Some(format_u256(receipt.block_number));
+                    transaction_info.transaction_index =
+                        Some(format_u256(U256::from(receipt.tx_index)));
+                    transaction_info.gas_price = format_u256(receipt.effective_gas_price)
+                }
+
                 Ok(Some(transaction_info))
             })
     }
@@ -491,15 +575,35 @@ impl MetachainRPCServer for MetachainRPCModule {
     fn get_transaction_by_block_number_and_index(
         &self,
         number: U256,
-        index: usize,
+        index: U256,
     ) -> RpcResult<Option<EthTransactionInfo>> {
         self.handler
             .storage
-            .get_transaction_by_block_number_and_index(&number, index)
+            .get_transaction_by_block_number_and_index(
+                &number,
+                index.try_into().map_err(to_jsonrpsee_custom_error)?,
+            )
+            .map_err(to_jsonrpsee_custom_error)?
             .map_or(Ok(None), |tx| {
-                let transaction_info = tx
-                    .try_into()
-                    .map_err(|e: TransactionError| Error::Custom(e.to_string()))?;
+                let tx_hash = &tx.hash();
+                let mut transaction_info: EthTransactionInfo =
+                    tx.try_into().map_err(to_jsonrpsee_custom_error)?;
+
+                // TODO: Improve efficiency by indexing the block_hash, block_number, and transaction_index fields.
+                // Temporary workaround: Makes an additional call to get_receipt where these fields are available.
+                if let Some(receipt) = self
+                    .handler
+                    .storage
+                    .get_receipt(tx_hash)
+                    .map_err(to_jsonrpsee_custom_error)?
+                {
+                    transaction_info.block_hash = Some(format_h256(receipt.block_hash));
+                    transaction_info.block_number = Some(format_u256(receipt.block_number));
+                    transaction_info.transaction_index =
+                        Some(format_u256(U256::from(receipt.tx_index)));
+                    transaction_info.gas_price = format_u256(receipt.effective_gas_price)
+                }
+
                 Ok(Some(transaction_info))
             })
     }
@@ -508,6 +612,7 @@ impl MetachainRPCServer for MetachainRPCModule {
         self.handler
             .storage
             .get_block_by_hash(&hash)
+            .map_err(to_jsonrpsee_custom_error)?
             .map_or(Ok(0), |b| Ok(b.transactions.len()))
     }
 
@@ -516,11 +621,12 @@ impl MetachainRPCServer for MetachainRPCModule {
         self.handler
             .storage
             .get_block_by_number(&block_number)
+            .map_err(to_jsonrpsee_custom_error)?
             .map_or(Ok(0), |b| Ok(b.transactions.len()))
     }
 
-    fn send_transaction(&self, request: TransactionRequest) -> RpcResult<String> {
-        debug!(target:"rpc", "[send_transaction] Sending transaction: {:?}", request);
+    fn sign_transaction(&self, request: TransactionRequest) -> RpcResult<String> {
+        debug!(target:"rpc", "[sign_transaction] signing transaction: {:?}", request);
 
         let from = match request.from {
             Some(from) => from,
@@ -538,14 +644,15 @@ impl MetachainRPCServer for MetachainRPCModule {
         let chain_id = ain_cpp_imports::get_chain_id()
             .map_err(|e| Error::Custom(format!("ain_cpp_imports::get_chain_id error : {e:?}")))?;
 
-        let block_number = self.block_number()?;
-
+        let Ok(state_root) = self.handler.core.get_state_root() else {
+            return Err(Error::Custom(String::from("Could not get state root")));
+        };
         let nonce = match request.nonce {
             Some(nonce) => nonce,
             None => self
                 .handler
-                .evm
-                .get_nonce(from, block_number)
+                .core
+                .get_next_account_nonce(from, state_root)
                 .map_err(|e| {
                     Error::Custom(format!("Error getting address transaction count : {e:?}"))
                 })?,
@@ -595,12 +702,19 @@ impl MetachainRPCServer for MetachainRPCModule {
             }
         };
 
-        let transaction = sign(from, message).unwrap();
+        let signed = sign(from, message).unwrap();
 
-        let encoded_bytes = transaction.encode();
-        let encoded_string = hex::encode(encoded_bytes);
-        let encoded = encoded_string.as_str();
-        let hash = self.send_raw_transaction(encoded)?;
+        let encoded = hex::encode(signed.encode());
+
+        Ok(encoded)
+    }
+
+    fn send_transaction(&self, request: TransactionRequest) -> RpcResult<String> {
+        debug!(target:"rpc", "[send_transaction] Sending transaction: {:?}", request);
+
+        let signed = self.sign_transaction(request)?;
+
+        let hash = self.send_raw_transaction(signed.as_str())?;
         debug!(target:"rpc", "[send_transaction] signed: {:?}", hash);
 
         Ok(hash)
@@ -615,7 +729,11 @@ impl MetachainRPCServer for MetachainRPCModule {
         match ain_cpp_imports::publish_eth_transaction(hex) {
             Ok(res_string) => {
                 if res_string.is_empty() {
-                    let signed_tx = SignedTx::try_from(raw_tx)
+                    let signed_tx: SignedTx = self
+                        .handler
+                        .core
+                        .signed_tx_cache
+                        .try_get_or_create(raw_tx)
                         .map_err(|e| Error::Custom(format!("TX error {e:?}")))?;
 
                     debug!(target:"rpc",
@@ -628,10 +746,22 @@ impl MetachainRPCServer for MetachainRPCModule {
                     );
                     debug!(target:"rpc",
                         "[send_raw_transaction] transaction hash : {:#x}",
-                        signed_tx.transaction.hash()
+                        signed_tx.hash()
                     );
 
-                    Ok(format!("{:#x}", signed_tx.transaction.hash()))
+                    if !self
+                        .handler
+                        .core
+                        .store_account_nonce(signed_tx.sender, signed_tx.nonce())
+                    {
+                        return Err(Error::Custom(format!(
+                            "Could not cache nonce {:x?} for {:x?}",
+                            signed_tx.nonce(),
+                            signed_tx.sender
+                        )));
+                    }
+
+                    Ok(format!("{:#x}", signed_tx.hash()))
                 } else {
                     debug!(target:"rpc", "[send_raw_transaction] Could not publish raw transaction: {tx} reason: {res_string}");
                     Err(Error::Custom(format!(
@@ -655,11 +785,9 @@ impl MetachainRPCServer for MetachainRPCModule {
         let block_number = self.block_number_to_u256(block_number)?;
         let nonce = self
             .handler
-            .evm
-            .get_nonce(address, block_number)
-            .map_err(|e| {
-                Error::Custom(format!("Error getting address transaction count : {e:?}"))
-            })?;
+            .core
+            .get_nonce_from_block_number(address, block_number)
+            .map_err(to_jsonrpsee_custom_error)?;
 
         debug!(target:"rpc", "Count: {:#?}", nonce);
         Ok(nonce)
@@ -676,21 +804,39 @@ impl MetachainRPCServer for MetachainRPCModule {
             gas,
             value,
             data,
+            access_list,
+            gas_price,
+            max_fee_per_gas,
+            transaction_type,
             ..
         } = input;
 
         let block_number = self.block_number_to_u256(block_number)?;
+        let gas_limit = self
+            .handler
+            .storage
+            .get_attributes_or_default()
+            .map_err(to_jsonrpsee_custom_error)?
+            .block_gas_limit;
+        let gas_limit = gas
+            .unwrap_or(U256::from(gas_limit))
+            .try_into()
+            .map_err(to_jsonrpsee_custom_error)?;
+
         let TxResponse { used_gas, .. } = self
             .handler
-            .evm
+            .core
             .call(EthCallArgs {
                 caller: from,
                 to,
                 value: value.unwrap_or_default(),
                 data: &data.map(|d| d.0).unwrap_or_default(),
-                gas_limit: gas.unwrap_or(MAX_GAS_PER_BLOCK).as_u64(),
-                access_list: vec![],
+                gas_limit,
+                gas_price,
+                max_fee_per_gas,
+                access_list: access_list.unwrap_or_default(),
                 block_number,
+                transaction_type,
             })
             .map_err(|e| Error::Custom(format!("Error calling EVM : {e:?}")))?;
 
@@ -699,7 +845,11 @@ impl MetachainRPCServer for MetachainRPCModule {
     }
 
     fn gas_price(&self) -> RpcResult<U256> {
-        let gas_price = self.handler.block.get_legacy_fee();
+        let gas_price = self
+            .handler
+            .block
+            .get_legacy_fee()
+            .map_err(to_jsonrpsee_custom_error)?;
         debug!(target:"rpc", "gasPrice: {:#?}", gas_price);
         Ok(gas_price)
     }
@@ -708,10 +858,11 @@ impl MetachainRPCServer for MetachainRPCModule {
         self.handler
             .storage
             .get_receipt(&hash)
+            .map_err(to_jsonrpsee_custom_error)?
             .map_or(Ok(None), |receipt| Ok(Some(ReceiptResult::from(receipt))))
     }
 
-    fn get_getwork(&self) -> RpcResult<Vec<String>> {
+    fn get_work(&self) -> RpcResult<Vec<String>> {
         Ok(vec![
             "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
@@ -719,29 +870,36 @@ impl MetachainRPCServer for MetachainRPCModule {
         ])
     }
 
-    fn eth_submitwork(&self, _nonce: String, _hash: String, _digest: String) -> RpcResult<bool> {
+    fn submit_work(&self, _nonce: String, _hash: String, _digest: String) -> RpcResult<bool> {
         Ok(false)
     }
 
-    fn eth_submithashrate(&self, _hashrate: String, _id: String) -> RpcResult<bool> {
+    fn submit_hashrate(&self, _hashrate: String, _id: String) -> RpcResult<bool> {
         Ok(false)
     }
 
     fn fee_history(
         &self,
         block_count: U256,
-        first_block: U256,
+        first_block: BlockNumber,
         priority_fee_percentile: Vec<usize>,
     ) -> RpcResult<RpcFeeHistory> {
-        Ok(RpcFeeHistory::from(self.handler.block.fee_history(
-            block_count.as_usize(),
-            first_block,
-            priority_fee_percentile,
-        )))
+        let first_block_number = self.block_number_to_u256(Some(first_block))?;
+        let block_count = block_count.try_into().map_err(to_jsonrpsee_custom_error)?;
+        let fee_history = self
+            .handler
+            .block
+            .fee_history(block_count, first_block_number, priority_fee_percentile)
+            .map_err(|e| Error::Custom(format!("{e:?}")))?;
+
+        Ok(RpcFeeHistory::from(fee_history))
     }
 
     fn max_priority_fee_per_gas(&self) -> RpcResult<U256> {
-        Ok(self.handler.block.suggested_priority_fee())
+        self.handler
+            .block
+            .suggested_priority_fee()
+            .map_err(to_jsonrpsee_custom_error)
     }
 
     fn syncing(&self) -> RpcResult<SyncState> {
@@ -760,12 +918,13 @@ impl MetachainRPCServer for MetachainRPCModule {
                     .handler
                     .storage
                     .get_latest_block()
+                    .map_err(to_jsonrpsee_custom_error)?
                     .map(|block| block.header.number)
                     .ok_or_else(|| Error::Custom(String::from("Unable to get current block")))?;
 
-                let starting_block = self.handler.block.get_first_block_number();
+                let starting_block = self.handler.block.get_starting_block_number();
 
-                let highest_block = current_block + (highest_native_block - current_native_height);
+                let highest_block = current_block + (highest_native_block - current_native_height); // safe since current height cannot be higher than seen height
                 debug!("Highest native: {highest_native_block}\nCurrent native: {current_native_height}\nCurrent ETH: {current_block}\nHighest ETH: {highest_block}");
 
                 Ok(SyncState::Syncing(SyncInfo {
@@ -778,19 +937,19 @@ impl MetachainRPCServer for MetachainRPCModule {
         }
     }
     fn get_uncle_count_by_block_number(&self) -> RpcResult<U256> {
-        Ok(Default::default())
+        Ok(U256::default())
     }
 
     fn get_uncle_count_by_block_hash(&self) -> RpcResult<U256> {
-        Ok(Default::default())
+        Ok(U256::default())
     }
 
     fn get_uncle_by_block_number(&self) -> RpcResult<Option<bool>> {
-        Ok(Default::default())
+        Ok(None)
     }
 
     fn get_uncle_by_block_hash(&self) -> RpcResult<Option<bool>> {
-        Ok(Default::default())
+        Ok(None)
     }
 
     fn get_logs(&self, input: GetLogsRequest) -> RpcResult<Vec<LogResult>> {
@@ -817,33 +976,150 @@ impl MetachainRPCServer for MetachainRPCModule {
 
                 while block_number <= to_block_number {
                     block_numbers.push(block_number);
-                    block_number += U256::one();
+                    block_number = block_number
+                        .checked_add(U256::one())
+                        .ok_or_else(|| Error::Custom("block_number overflow".to_string()))?;
                 }
 
-                block_numbers
+                Ok::<Vec<U256>, Error>(block_numbers)
             }
             Some(block_hash) => {
-                vec![
-                    self.handler
-                        .storage
-                        .get_block_by_hash(&block_hash)
-                        .ok_or_else(|| Error::Custom(String::from("Unable to find block hash")))?
-                        .header
-                        .number,
-                ]
+                let block_number = self
+                    .handler
+                    .storage
+                    .get_block_by_hash(&block_hash)
+                    .map_err(to_jsonrpsee_custom_error)?
+                    .ok_or_else(|| Error::Custom(String::from("Unable to find block hash")))?
+                    .header
+                    .number;
+                Ok(vec![block_number])
             }
-        };
+        }?;
 
-        Ok(block_numbers
+        let logs_result = block_numbers
             .into_iter()
-            .flat_map(|block_number| {
+            .map(|block_number| {
                 self.handler
                     .logs
-                    .get_logs(input.clone().address, input.clone().topics, block_number)
+                    .get_logs(&input.address, &input.topics, block_number)
+                    .map_err(to_jsonrpsee_custom_error)
+            })
+            .collect::<RpcResult<Vec<Vec<_>>>>()?
+            .into_iter()
+            .flatten()
+            .map(LogResult::from)
+            .collect::<Vec<_>>();
+        Ok(logs_result)
+    }
+
+    fn new_filter(&self, input: NewFilterRequest) -> RpcResult<U256> {
+        let from_block_number = self.block_number_to_u256(input.from_block)?;
+        let to_block_number = self.block_number_to_u256(input.to_block)?;
+
+        if from_block_number > to_block_number {
+            return Err(Error::Custom(format!(
+                "fromBlock ({}) > toBlock ({})",
+                format_u256(from_block_number),
+                format_u256(to_block_number)
+            )));
+        }
+
+        Ok(self
+            .handler
+            .filters
+            .create_logs_filter(
+                input.address,
+                input.topics,
+                from_block_number,
+                to_block_number,
+            )
+            .into())
+    }
+
+    fn new_block_filter(&self) -> RpcResult<U256> {
+        Ok(self.handler.filters.create_block_filter().into())
+    }
+
+    fn get_filter_changes(&self, filter_id: U256) -> RpcResult<GetFilterChangesResult> {
+        let filter = usize::try_from(filter_id)
+            .and_then(|id| self.handler.filters.get_filter(id))
+            .map_err(to_jsonrpsee_custom_error)?;
+
+        let res = match filter {
+            Filter::Logs(filter) => {
+                let current_block_height = match self
+                    .handler
+                    .storage
+                    .get_latest_block()
+                    .map_err(to_jsonrpsee_custom_error)?
+                {
+                    None => return Err(Error::Custom(String::from("Latest block unavailable"))),
+                    Some(block) => block.header.number,
+                };
+
+                let logs = self
+                    .handler
+                    .logs
+                    .get_logs_from_filter(&filter, &FilterType::GetFilterChanges)
+                    .map_err(to_jsonrpsee_custom_error)?
                     .into_iter()
                     .map(LogResult::from)
-            })
-            .collect())
+                    .collect();
+
+                usize::try_from(filter_id)
+                    .and_then(|id| {
+                        self.handler
+                            .filters
+                            .update_last_block(id, current_block_height)
+                    })
+                    .map_err(to_jsonrpsee_custom_error)?;
+
+                GetFilterChangesResult::Logs(logs)
+            }
+            Filter::NewBlock(_) => GetFilterChangesResult::NewBlock(
+                usize::try_from(filter_id)
+                    .and_then(|id| self.handler.filters.get_entries_from_filter(id))
+                    .map_err(to_jsonrpsee_custom_error)?,
+            ),
+            Filter::NewPendingTransactions(_) => GetFilterChangesResult::NewPendingTransactions(
+                usize::try_from(filter_id)
+                    .and_then(|id| self.handler.filters.get_entries_from_filter(id))
+                    .map_err(to_jsonrpsee_custom_error)?,
+            ),
+        };
+
+        Ok(res)
+    }
+
+    fn uninstall_filter(&self, filter_id: U256) -> RpcResult<bool> {
+        let filter_id = usize::try_from(filter_id).map_err(to_jsonrpsee_custom_error)?;
+
+        Ok(self.handler.filters.delete_filter(filter_id))
+    }
+
+    fn get_filter_logs(&self, filter_id: U256) -> RpcResult<Vec<LogResult>> {
+        let filter = usize::try_from(filter_id)
+            .and_then(|id| self.handler.filters.get_filter(id))
+            .map_err(to_jsonrpsee_custom_error)?;
+
+        match filter {
+            Filter::Logs(filter) => {
+                let logs = self
+                    .handler
+                    .logs
+                    .get_logs_from_filter(&filter, &FilterType::GetFilterLogs)
+                    .map_err(to_jsonrpsee_custom_error)?
+                    .into_iter()
+                    .map(LogResult::from)
+                    .collect();
+                Ok(logs)
+            }
+            _ => Err(Error::Custom(String::from("Filter is not a log filter"))),
+        }
+    }
+
+    fn new_pending_transaction_filter(&self) -> RpcResult<U256> {
+        Ok(self.handler.filters.create_transaction_filter().into())
     }
 }
 
@@ -852,8 +1128,8 @@ fn sign(
     message: TransactionMessage,
 ) -> Result<TransactionV2, Box<dyn std::error::Error>> {
     debug!("sign address {:#x}", address);
-    let key_id = address.as_fixed_bytes().to_owned();
-    let priv_key = get_eth_priv_key(key_id).unwrap();
+    let key = format!("{address:?}");
+    let priv_key = get_eth_priv_key(key).unwrap();
     let secret_key = SecretKey::parse(&priv_key).unwrap();
 
     match message {
@@ -862,8 +1138,8 @@ fn sign(
                 .map_err(|_| Error::Custom(String::from("invalid signing message")))?;
             let (signature, recid) = libsecp256k1::sign(&signing_message, &secret_key);
             let v = match m.chain_id {
-                None => 27 + recid.serialize() as u64,
-                Some(chain_id) => 2 * chain_id + 35 + recid.serialize() as u64,
+                None => 27 + u64::from(recid.serialize()),
+                Some(chain_id) => 2 * chain_id + 35 + u64::from(recid.serialize()),
             };
             let rs = signature.serialize();
             let r = H256::from_slice(&rs[0..32]);

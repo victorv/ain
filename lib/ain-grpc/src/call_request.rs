@@ -1,8 +1,7 @@
-use ethereum::AccessListItem;
-use primitive_types::{H160, U256};
-use serde::Deserialize;
-
 use ain_evm::bytes::Bytes;
+use ethereum::AccessListItem;
+use ethereum_types::{H160, U256};
+use serde::Deserialize;
 
 /// Call request
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]

@@ -24,12 +24,12 @@
 #include <key.h>
 #include <key_io.h>
 #include <ain_rs_exports.h>
-#include <masternodes/accountshistory.h>
-#include <masternodes/anchors.h>
-#include <masternodes/govvariables/attributes.h>
-#include <masternodes/masternodes.h>
-#include <masternodes/vaulthistory.h>
-#include <masternodes/threadpool.h>
+#include <dfi/accountshistory.h>
+#include <dfi/anchors.h>
+#include <dfi/govvariables/attributes.h>
+#include <dfi/masternodes.h>
+#include <dfi/vaulthistory.h>
+#include <dfi/threadpool.h>
 #include <miner.h>
 #include <net.h>
 #include <net_permissions.h>
@@ -64,6 +64,8 @@
 #include <validationinterface.h>
 #include <walletinitinterface.h>
 #include <wallet/wallet.h>
+#include <ffi/ffihelpers.h>
+#include <ffi/ffiexports.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -221,6 +223,7 @@ void Shutdown(InitInterfaces& interfaces)
     for (const auto& client : interfaces.chain_clients) {
         client->flush();
     }
+    XResultStatusLogged(ain_rs_stop_network_services(result));
     StopMapPort();
 
     // Because these depend on each-other, we make sure that neither can be
@@ -285,9 +288,10 @@ void Shutdown(InitInterfaces& interfaces)
     // up with our current chain to avoid any strange pruning edge cases and make
     // next startup faster by avoiding rescan.
 
+    ShutdownDfTxGlobalTaskPool();
+    XResultStatusLogged(ain_rs_stop_core_services(result));
     LogPrint(BCLog::SPV, "Releasing\n");
     spv::pspv.reset();
-    ShutdownDfTxGlobalTaskPool();
     {
         LOCK(cs_main);
         if (g_chainstate && g_chainstate->CanFlushToDisk()) {
@@ -426,7 +430,8 @@ void SetupServerArgs()
     gArgs.AddArg("-loadblock=<file>", "Imports blocks from external blk000??.dat file on startup", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     gArgs.AddArg("-maxmempool=<n>", strprintf("Keep the transaction memory pool below <n> megabytes (default: %u)", DEFAULT_MAX_MEMPOOL_SIZE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     gArgs.AddArg("-maxorphantx=<n>", strprintf("Keep at most <n> unconnectable transactions in memory (default: %u)", DEFAULT_MAX_ORPHAN_TRANSACTIONS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    gArgs.AddArg("-mempoolexpiry=<n>", strprintf("Do not keep transactions in the mempool longer than <n> hours (default: %u)", DEFAULT_MEMPOOL_EXPIRY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    gArgs.AddArg("-mempoolexpiry=<n>", strprintf("Do not keep transactions in the mempool longer than <n> hours (default: %u)", DEFAULT_MEMPOOL_DVM_EXPIRY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    gArgs.AddArg("-mempoolexpiryevm=<n>", strprintf("Do not keep EVM transactions in the mempool longer than <n> hours (default: %u)", DEFAULT_MEMPOOL_EVM_EXPIRY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     gArgs.AddArg("-minimumchainwork=<hex>", strprintf("Minimum work assumed to exist on a valid chain in hex (default: %s, testnet: %s, changi: %s, devnet: %s)", defaultChainParams->GetConsensus().nMinimumChainWork.GetHex(), testnetChainParams->GetConsensus().nMinimumChainWork.GetHex(), changiChainParams->GetConsensus().nMinimumChainWork.GetHex(), devnetChainParams->GetConsensus().nMinimumChainWork.GetHex()), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     gArgs.AddArg("-par=<n>", strprintf("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)",
         -GetNumCores(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -511,10 +516,7 @@ void SetupServerArgs()
     gArgs.AddArg("-fortcanningepilogueheight", "Alias for Fort Canning Epilogue fork activation height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     gArgs.AddArg("-grandcentralheight", "Grand Central fork activation height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     gArgs.AddArg("-grandcentralepilogueheight", "Grand Central Epilogue fork activation height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
-    gArgs.AddArg("-nextnetworkupgradeheight", "Next Network Upgrade fork activation height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
-    gArgs.AddArg("-changiintermediateheight", "Changi Intermediate fork activation height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
-    gArgs.AddArg("-changiintermediate2height", "Changi Intermediate2 fork activation height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
-    gArgs.AddArg("-changiintermediate3height", "Changi Intermediate3 fork activation height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+    gArgs.AddArg("-metachainheight", "Metachain fork activation height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     gArgs.AddArg("-jellyfish_regtest", "Configure the regtest network for jellyfish testing", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     gArgs.AddArg("-regtest-skip-loan-collateral-validation", "Skip loan collateral check for jellyfish testing", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     gArgs.AddArg("-regtest-minttoken-simulate-mainnet", "Simulate mainnet for minttokens on regtest -  default behavior on regtest is to allow anyone to mint mintable tokens for ease of testing", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
@@ -648,6 +650,8 @@ void SetupServerArgs()
     gArgs.AddArg("-grpcport=<port>", strprintf("Start GRPC connections on <port> and <port + 1> (default: %u, testnet: %u, changi: %u, devnet: %u, regtest: %u)", defaultBaseParams->GRPCPort(), testnetBaseParams->GRPCPort(), changiBaseParams->GRPCPort(), devnetBaseParams->GRPCPort(), regtestBaseParams->GRPCPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
     gArgs.AddArg("-ethrpcbind=<addr>[:port]", "Bind to given address to listen for ETH-JSON-RPC connections. Do not expose the ETH-RPC server to untrusted networks such as the public internet! This option is ignored unless -rpcallowip is also passed. Port is optional and overrides -ethrpcport. This option can be specified multiple times (default: 127.0.0.1 i.e., localhost)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
     gArgs.AddArg("-ethrpcport=<port>", strprintf("Listen for ETH-JSON-RPC connections on <port>> (default: %u, testnet: %u, changi: %u, devnet: %u, regtest: %u)", defaultBaseParams->ETHRPCPort(), testnetBaseParams->ETHRPCPort(), changiBaseParams->ETHRPCPort(), devnetBaseParams->ETHRPCPort(), regtestBaseParams->ETHRPCPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
+    gArgs.AddArg("-wsport=<port>", strprintf("Listen for ETH-WebSockets connections on <port>> (default: %u, testnet: %u, changi: %u, devnet: %u, regtest: %u)", defaultBaseParams->WSPort(), testnetBaseParams->WSPort(), changiBaseParams->WSPort(), devnetBaseParams->WSPort(), regtestBaseParams->ETHRPCPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
+    gArgs.AddArg("-ethmaxconnections=<connections>", strprintf("Set the maximum number of connections allowed by the ETH-RPC server (default: %u, testnet: %u, changi: %u, devnet: %u, regtest: %u)", DEFAULT_ETH_MAX_CONNECTIONS, DEFAULT_ETH_MAX_CONNECTIONS, DEFAULT_ETH_MAX_CONNECTIONS, DEFAULT_ETH_MAX_CONNECTIONS, DEFAULT_ETH_MAX_CONNECTIONS), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
 
 #if HAVE_DECL_DAEMON
     gArgs.AddArg("-daemon", "Run in the background as a daemon and accept commands", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1381,81 +1385,7 @@ bool AppInitLockDataDirectory()
     return true;
 }
 
-void SetupAnchorSPVDatabases(bool resync, int64_t customCache) {
-    // Close and open database
-    panchors.reset();
-    panchors = std::make_unique<CAnchorIndex>(customCache, false, gArgs.GetBoolArg("-spv", true) && resync);
-
-    // load anchors after spv due to spv (and spv height) not set before (no last height yet)
-    if (gArgs.GetBoolArg("-spv", true)) {
-        // Close database
-        spv::pspv.reset();
-
-        // Open database based on network
-        if (Params().NetworkIDString() == "regtest") {
-            spv::pspv = std::make_unique<spv::CFakeSpvWrapper>();
-        } else if (Params().NetworkIDString() == "test" || Params().NetworkIDString() == "changi" || Params().NetworkIDString() == "devnet") {
-            spv::pspv = std::make_unique<spv::CSpvWrapper>(false, customCache, false, resync);
-        } else {
-            spv::pspv = std::make_unique<spv::CSpvWrapper>(true, customCache, false, resync);
-        }
-    }
-}
-
-bool SetupInterruptArg(const std::string &argName, std::string &hashStore, int &heightStore) {
-    // Experimental: Block height or hash to invalidate on and stop sync
-    auto val = gArgs.GetArg(argName, "");
-    auto flagName = argName.substr(1);
-    if (val.empty())
-        return false;
-    if (val.size() == 64) {
-        hashStore = val;
-        LogPrintf("flag: %s hash: %s\n", flagName, hashStore);
-    } else {
-        std::stringstream ss(val);
-        ss >> heightStore;
-       if (heightStore) {
-            LogPrintf("flag: %s height: %d\n", flagName, heightStore);
-       } else {
-            LogPrintf("%s: invalid hash or height provided: %s\n", flagName, val);
-       }
-    }
-    return true;
-}
-
-void SetupInterrupts() {
-    auto isSet = false;
-    isSet = SetupInterruptArg("-interrupt-block", fInterruptBlockHash, fInterruptBlockHeight) || isSet;
-    isSet = SetupInterruptArg("-stop-block", fStopBlockHash, fStopBlockHeight) || isSet;
-    fStopOrInterrupt = isSet;
-}
-
-static bool LoanAmountsInClosedVaults(CCustomCSView &mnview) {
-    LOCK(cs_main);
-
-    std::set<CVaultId> vaults;
-    mnview.ForEachLoanTokenAmount([&](const CVaultId &vaultId, const CBalances &balances) {
-        vaults.insert(vaultId);
-        return true;
-    });
-
-    for (const auto &vaultId : vaults) {
-        const auto vault = mnview.GetVault(vaultId);
-        if (!vault) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool AppInitMain(InitInterfaces& interfaces)
-{
-    const CChainParams& chainparams = Params();
-    // ********************************************************* Step 4a: application initialization
-    if (!CreatePidFile()) {
-        // Detailed error printed inside CreatePidFile().
-        return false;
-    }
+bool SetupLogging() {
     if (LogInstance().m_print_to_file) {
         if (gArgs.GetBoolArg("-shrinkdebugfile", LogInstance().DefaultShrinkDebugFile())) {
             // Do this first since it both loads a bunch of debug.log into memory,
@@ -1473,33 +1403,10 @@ bool AppInitMain(InitInterfaces& interfaces)
     LogPrintf("Default data directory %s\n", GetDefaultDataDir().string());
     LogPrintf("Using data directory %s\n", GetDataDir().string());
 
-    // Only log conf file usage message if conf file actually exists.
-    fs::path config_file_path = GetConfigFile(gArgs.GetArg("-conf", DEFI_CONF_FILENAME));
-    if (fs::exists(config_file_path)) {
-        LogPrintf("Config file: %s\n", config_file_path.string());
-    } else if (gArgs.IsArgSet("-conf")) {
-        // Warn if no conf file exists at path provided by user
-        InitWarning(strprintf(_("The specified config file %s does not exist\n").translated, config_file_path.string()));
-    } else {
-        // Not categorizing as "Warning" because it's the default behavior
-        LogPrintf("Config file: %s (not found, skipping)\n", config_file_path.string());
-    }
+    return true;
+}
 
-    LogPrintf("Using at most %i automatic connections (%i file descriptors available)\n", nMaxConnections, nFD);
-
-    // Warn about relative -datadir path.
-    if (gArgs.IsArgSet("-datadir") && !fs::path(gArgs.GetArg("-datadir", "")).is_absolute()) {
-        LogPrintf("Warning: relative datadir option '%s' specified, which will be interpreted relative to the " /* Continued */
-                  "current working directory '%s'. This is fragile, because if defid is started in the future "
-                  "from a different location, it will be unable to locate the current data files. There could "
-                  "also be data loss if defi is started while in a temporary directory.\n",
-            gArgs.GetArg("-datadir", ""), fs::current_path().string());
-    }
-
-    InitSignatureCache();
-    InitScriptExecutionCache();
-    RPCMetadata::InitFromArgs(gArgs);
-
+void SetupScriptCheckThreads() {
     int script_threads = gArgs.GetArg("-par", DEFAULT_SCRIPTCHECK_THREADS);
     if (script_threads <= 0) {
         // -par=0 means autodetect (number of cores - 1 script threads)
@@ -1522,56 +1429,9 @@ bool AppInitMain(InitInterfaces& interfaces)
         g_parallel_script_checks = true;
         StartScriptCheckWorkerThreads(script_threads);
     }
+}
 
-    // Start the lightweight task scheduler thread
-    scheduler.m_service_thread = std::thread([&] { TraceThread("scheduler", [&] { scheduler.serviceQueue(); }); });
-
-    GetMainSignals().RegisterBackgroundSignalScheduler(scheduler);
-    GetMainSignals().RegisterWithMempoolSignals(mempool);
-
-    // Create client interfaces for wallets that are supposed to be loaded
-    // according to -wallet and -disablewallet options. This only constructs
-    // the interfaces, it doesn't load wallet data. Wallets actually get loaded
-    // when load() and start() interface methods are called below.
-    g_wallet_init_interface.Construct(interfaces);
-
-    /* Register RPC commands regardless of -server setting so they will be
-     * available in the GUI RPC console even if external calls are disabled.
-     */
-    RegisterAllCoreRPCCommands(tableRPC);
-    for (const auto& client : interfaces.chain_clients) {
-        client->registerRpcs();
-    }
-    g_rpc_interfaces = &interfaces;
-#if ENABLE_ZMQ
-    RegisterZMQRPCCommands(tableRPC);
-#endif
-
-    /* Start the RPC server already.  It will be started in "warmup" mode
-     * and not really process calls already (but it will signify connections
-     * that the server is there and will be ready later).  Warmup mode will
-     * be disabled when initialisation is finished.
-     */
-    if (gArgs.GetBoolArg("-server", false))
-    {
-        uiInterface.InitMessage_connect(SetRPCWarmupStatus);
-        if (!AppInitServers())
-            return InitError(_("Unable to start HTTP server. See debug log for details.").translated);
-    }
-
-    // ********************************************************* Step 5: verify wallet database integrity
-    for (const auto& client : interfaces.chain_clients) {
-        if (!client->verify()) {
-            return false;
-        }
-    }
-
-    // ********************************************************* Step 6: network initialization
-    // Note that we absolutely cannot open any actual connections
-    // until the very end ("start node") as the UTXO/block state
-    // is not yet setup and may end up being set up twice if we
-    // need to reindex later.
-
+bool SetupNetwork() {
     assert(!g_banman);
     g_banman = std::make_unique<BanMan>(GetDataDir() / "banlist.dat", &uiInterface, gArgs.GetArg("-bantime", DEFAULT_MISBEHAVING_BANTIME));
     assert(!g_connman);
@@ -1665,6 +1525,239 @@ bool AppInitMain(InitInterfaces& interfaces)
         else
             return InitError(ResolveErrMsg("externalip", strAddr));
     }
+    return true;
+}
+
+void SetupCacheSizes(CacheSizes& cacheSizes) {
+    // Cache size calculations
+    int64_t totalCache = (gArgs.GetArg("-dbcache", nDefaultDbCache) << 20);
+    totalCache = std::max(totalCache, nMinDbCache << 20); // total cache cannot be less than nMinDbCache
+    totalCache = std::min(totalCache, nMaxDbCache << 20); // total cache cannot be greater than nMaxDbcache
+
+    cacheSizes.customCacheSize = totalCache; // used for customs
+    cacheSizes.blockTreeDBCache = std::min(totalCache / 8, nMaxBlockDBCache << 20);
+    totalCache -= cacheSizes.blockTreeDBCache;
+    cacheSizes.txIndexCache = std::min(totalCache / 8, gArgs.GetBoolArg("-txindex", DEFAULT_TXINDEX) ? nMaxTxIndexCache << 20 : 0);
+    totalCache -= cacheSizes.txIndexCache;
+
+    cacheSizes.filterIndexCache = 0;
+    if (!g_enabled_filter_types.empty()) {
+        size_t n_indexes = g_enabled_filter_types.size();
+        int64_t max_cache = std::min(totalCache / 8, max_filter_index_cache << 20);
+        cacheSizes.filterIndexCache = max_cache / n_indexes;
+        totalCache -= cacheSizes.filterIndexCache * n_indexes;
+    }
+
+    cacheSizes.coinDBCache = std::min(totalCache / 2, (totalCache / 4) + (1 << 23)); // use 25%-50% of the remainder for disk cache
+    cacheSizes.coinDBCache = std::min(cacheSizes.coinDBCache, nMaxCoinsDBCache << 20); // cap total coins db cache
+    totalCache -= cacheSizes.coinDBCache;
+
+    nCoinCacheUsage = totalCache; // the rest goes to in-memory cache
+    nCustomMemUsage = std::max((totalCache >> 8), (nMinDbCache << 16)); // use significant less in-memory cache
+
+    int64_t nMempoolSizeMax = gArgs.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
+
+    // Log cache configurations
+    LogPrintf("Cache configuration:\n");
+    LogPrintf("* Using %.1f MiB for block index database\n", cacheSizes.blockTreeDBCache * (1.0 / 1024 / 1024));
+    if (gArgs.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {
+        LogPrintf("* Using %.1f MiB for transaction index database\n", cacheSizes.txIndexCache * (1.0 / 1024 / 1024));
+    }
+    for (BlockFilterType filter_type : g_enabled_filter_types) {
+        LogPrintf("* Using %.1f MiB for %s block filter index database\n",
+                  cacheSizes.filterIndexCache * (1.0 / 1024 / 1024), BlockFilterTypeName(filter_type));
+    }
+    LogPrintf("* Using %.1f MiB for chain state database\n", cacheSizes.coinDBCache * (1.0 / 1024 / 1024));
+    LogPrintf("* Using %.1f MiB for in-memory UTXO set (plus up to %.1f MiB of unused mempool space)\n", nCoinCacheUsage * (1.0 / 1024 / 1024), nMempoolSizeMax * (1.0 / 1024 / 1024));
+}
+
+void SetupRPCPorts(std::vector<std::pair<std::string, uint16_t>>& ethEndpoints, std::vector<std::pair<std::string, uint16_t>>& gEndpoints) {
+    // Current API only allows for one ETH RPC/gRPC server to bind to one address.
+    // By default, we will take the first address, if multiple addresses are specified.
+    int eth_rpc_port = gArgs.GetArg("-ethrpcport", BaseParams().ETHRPCPort());
+    int grpc_port = gArgs.GetArg("-grpcport", BaseParams().GRPCPort());
+    int websockets_port = gArgs.GetArg("-wsport", BaseParams().WSPort());
+
+    // Determine which addresses to bind to ETH RPC server
+    if (!(gArgs.IsArgSet("-rpcallowip") && gArgs.IsArgSet("-ethrpcbind"))) { // Default to loopback if not allowing external IPs
+        ethEndpoints.emplace_back("127.0.0.1", eth_rpc_port);
+        ethEndpoints.emplace_back("127.0.0.1", websockets_port);
+        if (gArgs.IsArgSet("-rpcallowip")) {
+            LogPrintf("WARNING: option -rpcallowip was specified without -ethrpcbind; this doesn't usually make sense\n");
+        }
+        if (gArgs.IsArgSet("-ethrpcbind")) {
+            LogPrintf("WARNING: option -ethrpcbind was ignored because -rpcallowip was not specified, refusing to allow everyone to connect\n");
+        }
+    } else if (gArgs.IsArgSet("-ethrpcbind")) { // Specific bind address
+        for (const std::string& strETHRPCBind : gArgs.GetArgs("-ethrpcbind")) {
+            int port = eth_rpc_port;
+            int ws_port = websockets_port;
+
+            std::string host;
+            SplitHostPort(strETHRPCBind, port, host);
+            ethEndpoints.emplace_back(host, port);
+            ethEndpoints.emplace_back(host, ws_port);
+        }
+    }
+
+    // Determine which addresses to bind to gRPC server
+    if (!(gArgs.IsArgSet("-rpcallowip") && gArgs.IsArgSet("-grpcbind"))) { // Default to loopback if not allowing external IPs
+        gEndpoints.emplace_back("127.0.0.1", grpc_port);
+        if (gArgs.IsArgSet("-rpcallowip")) {
+            LogPrintf("WARNING: option -rpcallowip was specified without -grpcbind; this doesn't usually make sense\n");
+        }
+        if (gArgs.IsArgSet("-grpcbind")) {
+            LogPrintf("WARNING: option -grpcbind was ignored because -rpcallowip was not specified, refusing to allow everyone to connect\n");
+        }
+    } else if (gArgs.IsArgSet("-grpcbind")) { // Specific bind address
+        for (const std::string& strGRPCBind : gArgs.GetArgs("-grpcbind")) {
+            int port = grpc_port;
+            std::string host;
+            SplitHostPort(strGRPCBind, port, host);
+            gEndpoints.emplace_back(host, port);
+        }
+    }
+}
+
+void SetupAnchorSPVDatabases(bool resync, int64_t customCache) {
+    // Close and open database
+    panchors.reset();
+    panchors = std::make_unique<CAnchorIndex>(customCache, false, gArgs.GetBoolArg("-spv", true) && resync);
+
+    // load anchors after spv due to spv (and spv height) not set before (no last height yet)
+    if (gArgs.GetBoolArg("-spv", true)) {
+        // Close database
+        spv::pspv.reset();
+
+        // Open database based on network
+        if (Params().NetworkIDString() == "regtest") {
+            spv::pspv = std::make_unique<spv::CFakeSpvWrapper>();
+        } else if (Params().NetworkIDString() == "test" || Params().NetworkIDString() == "changi" || Params().NetworkIDString() == "devnet") {
+            spv::pspv = std::make_unique<spv::CSpvWrapper>(false, customCache, false, resync);
+        } else {
+            spv::pspv = std::make_unique<spv::CSpvWrapper>(true, customCache, false, resync);
+        }
+    }
+}
+
+bool SetupInterruptArg(const std::string &argName, std::string &hashStore, int &heightStore) {
+    // Experimental: Block height or hash to invalidate on and stop sync
+    auto val = gArgs.GetArg(argName, "");
+    auto flagName = argName.substr(1);
+    if (val.empty())
+        return false;
+    if (val.size() == 64) {
+        hashStore = val;
+        LogPrintf("flag: %s hash: %s\n", flagName, hashStore);
+    } else {
+        std::stringstream ss(val);
+        ss >> heightStore;
+       if (heightStore) {
+            LogPrintf("flag: %s height: %d\n", flagName, heightStore);
+       } else {
+            LogPrintf("%s: invalid hash or height provided: %s\n", flagName, val);
+       }
+    }
+    return true;
+}
+
+void SetupInterrupts() {
+    auto isSet = false;
+    isSet = SetupInterruptArg("-interrupt-block", fInterruptBlockHash, fInterruptBlockHeight) || isSet;
+    isSet = SetupInterruptArg("-stop-block", fStopBlockHash, fStopBlockHeight) || isSet;
+    fStopOrInterrupt = isSet;
+}
+
+bool AppInitMain(InitInterfaces& interfaces)
+{
+    const CChainParams& chainparams = Params();
+    // ********************************************************* Step 5: application initialization
+    if (!CreatePidFile()) {
+        return false;
+    }
+
+    if (!SetupLogging()) {
+        return false;
+    }
+
+    // Only log conf file usage message if conf file actually exists.
+    fs::path config_file_path = GetConfigFile(gArgs.GetArg("-conf", DEFI_CONF_FILENAME));
+    if (fs::exists(config_file_path)) {
+        LogPrintf("Config file: %s\n", config_file_path.string());
+    } else if (gArgs.IsArgSet("-conf")) {
+        // Warn if no conf file exists at path provided by user
+        InitWarning(strprintf(_("The specified config file %s does not exist\n").translated, config_file_path.string()));
+    } else {
+        // Not categorizing as "Warning" because it's the default behavior
+        LogPrintf("Config file: %s (not found, skipping)\n", config_file_path.string());
+    }
+
+    LogPrintf("Using at most %i automatic connections (%i file descriptors available)\n", nMaxConnections, nFD);
+
+    // Warn about relative -datadir path.
+    if (gArgs.IsArgSet("-datadir") && !fs::path(gArgs.GetArg("-datadir", "")).is_absolute()) {
+        LogPrintf("Warning: relative datadir option '%s' specified, which will be interpreted relative to the " /* Continued */
+                  "current working directory '%s'. This is fragile, because if defid is started in the future "
+                  "from a different location, it will be unable to locate the current data files. There could "
+                  "also be data loss if defi is started while in a temporary directory.\n",
+            gArgs.GetArg("-datadir", ""), fs::current_path().string());
+    }
+
+    InitSignatureCache();
+    InitScriptExecutionCache();
+    RPCMetadata::InitFromArgs(gArgs);
+    SetupScriptCheckThreads();
+
+    // Start the lightweight task scheduler thread
+    scheduler.m_service_thread = std::thread([&] { TraceThread("scheduler", [&] { scheduler.serviceQueue(); }); });
+    GetMainSignals().RegisterBackgroundSignalScheduler(scheduler);
+    GetMainSignals().RegisterWithMempoolSignals(mempool);
+
+    // Create client interfaces for wallets that are supposed to be loaded
+    // according to -wallet and -disablewallet options. This only constructs
+    // the interfaces, it doesn't load wallet data. Wallets actually get loaded
+    // when load() and start() interface methods are called below.
+    g_wallet_init_interface.Construct(interfaces);
+
+    /* Register RPC commands regardless of -server setting so they will be
+     * available in the GUI RPC console even if external calls are disabled.
+     */
+    RegisterAllCoreRPCCommands(tableRPC);
+    for (const auto& client : interfaces.chain_clients) {
+        client->registerRpcs();
+    }
+    g_rpc_interfaces = &interfaces;
+#if ENABLE_ZMQ
+    RegisterZMQRPCCommands(tableRPC);
+#endif
+
+    /* Start the RPC server already.  It will be started in "warmup" mode
+     * and not really process calls already (but it will signify connections
+     * that the server is there and will be ready later).  Warmup mode will
+     * be disabled when initialisation is finished.
+     */
+    if (gArgs.GetBoolArg("-server", false))
+    {
+        uiInterface.InitMessage_connect(SetRPCWarmupStatus);
+        if (!AppInitServers())
+            return InitError(_("Unable to start HTTP server. See debug log for details.").translated);
+    }
+
+    // ********************************************************* Step 6: verify wallet database integrity
+    for (const auto& client : interfaces.chain_clients) {
+        if (!client->verify()) {
+            return false;
+        }
+    }
+
+    // ********************************************************* Step 7: network initialization
+    // Note that we absolutely cannot open any actual connections
+    // until the very end ("start node") as the UTXO/block state
+    // is not yet setup and may end up being set up twice if we
+    // need to reindex later.
+    if (!SetupNetwork()) {
+        return false;
+    }
 
 #if ENABLE_ZMQ
     g_zmq_notification_interface = CZMQNotificationInterface::Create();
@@ -1683,48 +1776,14 @@ bool AppInitMain(InitInterfaces& interfaces)
     // Setup interrupts
     SetupInterrupts();
 
-    // ********************************************************* Step 7: load block chain
-
-    fReindex = gArgs.GetBoolArg("-reindex", false);
-    bool fReindexChainState = gArgs.GetBoolArg("-reindex-chainstate", false);
-
-    // cache size calculations
-    int64_t nTotalCache = (gArgs.GetArg("-dbcache", nDefaultDbCache) << 20);
-    nTotalCache = std::max(nTotalCache, nMinDbCache << 20); // total cache cannot be less than nMinDbCache
-    nTotalCache = std::min(nTotalCache, nMaxDbCache << 20); // total cache cannot be greater than nMaxDbcache
-    auto nCustomCacheSize = nTotalCache; // used for customs
-    int64_t nBlockTreeDBCache = std::min(nTotalCache / 8, nMaxBlockDBCache << 20);
-    nTotalCache -= nBlockTreeDBCache;
-    int64_t nTxIndexCache = std::min(nTotalCache / 8, gArgs.GetBoolArg("-txindex", DEFAULT_TXINDEX) ? nMaxTxIndexCache << 20 : 0);
-    nTotalCache -= nTxIndexCache;
-    int64_t filter_index_cache = 0;
-    if (!g_enabled_filter_types.empty()) {
-        size_t n_indexes = g_enabled_filter_types.size();
-        int64_t max_cache = std::min(nTotalCache / 8, max_filter_index_cache << 20);
-        filter_index_cache = max_cache / n_indexes;
-        nTotalCache -= filter_index_cache * n_indexes;
-    }
-    int64_t nCoinDBCache = std::min(nTotalCache / 2, (nTotalCache / 4) + (1 << 23)); // use 25%-50% of the remainder for disk cache
-    nCoinDBCache = std::min(nCoinDBCache, nMaxCoinsDBCache << 20); // cap total coins db cache
-    nTotalCache -= nCoinDBCache;
-    nCoinCacheUsage = nTotalCache; // the rest goes to in-memory cache
-    nCustomMemUsage = std::max((nTotalCache >> 8), (nMinDbCache << 16)); // use significant less in-memory cache
-    int64_t nMempoolSizeMax = gArgs.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
-    LogPrintf("Cache configuration:\n");
-    LogPrintf("* Using %.1f MiB for block index database\n", nBlockTreeDBCache * (1.0 / 1024 / 1024));
-    if (gArgs.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {
-        LogPrintf("* Using %.1f MiB for transaction index database\n", nTxIndexCache * (1.0 / 1024 / 1024));
-    }
-    for (BlockFilterType filter_type : g_enabled_filter_types) {
-        LogPrintf("* Using %.1f MiB for %s block filter index database\n",
-                  filter_index_cache * (1.0 / 1024 / 1024), BlockFilterTypeName(filter_type));
-    }
-    LogPrintf("* Using %.1f MiB for chain state database\n", nCoinDBCache * (1.0 / 1024 / 1024));
-    LogPrintf("* Using %.1f MiB for in-memory UTXO set (plus up to %.1f MiB of unused mempool space)\n", nCoinCacheUsage * (1.0 / 1024 / 1024), nMempoolSizeMax * (1.0 / 1024 / 1024));
-
+    // ********************************************************* Step 8: load block chain
+    CacheSizes nCacheSizes;
+    SetupCacheSizes(nCacheSizes);
     InitDfTxGlobalTaskPool();
 
     bool fLoaded = false;
+    fReindex = gArgs.GetBoolArg("-reindex", false);
+    bool fReindexChainState = gArgs.GetBoolArg("-reindex-chainstate", false);
     while (!fLoaded && !ShutdownRequested()) {
         bool fReset = fReindex;
         std::string strLoadError;
@@ -1743,7 +1802,7 @@ bool AppInitMain(InitInterfaces& interfaces)
                 // new CBlockTreeDB tries to delete the existing file, which
                 // fails if it's still open from the previous loop. Close it first:
                 pblocktree.reset();
-                pblocktree.reset(new CBlockTreeDB(nBlockTreeDBCache, false, fReset));
+                pblocktree.reset(new CBlockTreeDB(nCacheSizes.blockTreeDBCache, false, fReset));
 
                 if (fReset) {
                     pblocktree->WriteReindexing(true);
@@ -1791,7 +1850,7 @@ bool AppInitMain(InitInterfaces& interfaces)
                 // block tree into BlockIndex()!
 
                 ::ChainstateActive().InitCoinsDB(
-                    /* cache_size_bytes */ nCoinDBCache,
+                    /* cache_size_bytes */ nCacheSizes.coinDBCache,
                     /* in_memory */ false,
                     /* should_wipe */ fReset || fReindexChainState);
 
@@ -1802,7 +1861,7 @@ bool AppInitMain(InitInterfaces& interfaces)
                 });
 
                 pcustomcsDB.reset();
-                pcustomcsDB = std::make_unique<CStorageLevelDB>(GetDataDir() / "enhancedcs", nCustomCacheSize, false, fReset || fReindexChainState);
+                pcustomcsDB = std::make_unique<CStorageLevelDB>(GetDataDir() / "enhancedcs", nCacheSizes.customCacheSize, false, fReset || fReindexChainState);
                 pcustomcsview.reset();
                 pcustomcsview = std::make_unique<CCustomCSView>(*pcustomcsDB.get());
 
@@ -1816,26 +1875,21 @@ bool AppInitMain(InitInterfaces& interfaces)
                 // Ensure we are on latest DB version
                 pcustomcsview->SetDbVersion(CCustomCSView::DbVersion);
 
-                if (LoanAmountsInClosedVaults(*pcustomcsview)) {
-                    strLoadError = "Corrupted block database detected. You will need to rebuild the database using -reindex-chainstate.";
-                    break;
-                }
-
                 // make account history db
                 paccountHistoryDB.reset();
                 if (gArgs.GetBoolArg("-acindex", DEFAULT_ACINDEX)) {
-                    paccountHistoryDB = std::make_unique<CAccountHistoryStorage>(GetDataDir() / "history", nCustomCacheSize, false, fReset || fReindexChainState);
+                    paccountHistoryDB = std::make_unique<CAccountHistoryStorage>(GetDataDir() / "history", nCacheSizes.customCacheSize, false, fReset || fReindexChainState);
                     paccountHistoryDB->CreateMultiIndexIfNeeded();
                 }
 
                 pburnHistoryDB.reset();
-                pburnHistoryDB = std::make_unique<CBurnHistoryStorage>(GetDataDir() / "burn", nCustomCacheSize, false, fReset || fReindexChainState);
+                pburnHistoryDB = std::make_unique<CBurnHistoryStorage>(GetDataDir() / "burn", nCacheSizes.customCacheSize, false, fReset || fReindexChainState);
                 pburnHistoryDB->CreateMultiIndexIfNeeded();
 
                 // Create vault history DB
                 pvaultHistoryDB.reset();
                 if (gArgs.GetBoolArg("-vaultindex", DEFAULT_VAULTINDEX)) {
-                    pvaultHistoryDB = std::make_unique<CVaultHistoryStorage>(GetDataDir() / "vault", nCustomCacheSize, false, fReset || fReindexChainState);
+                    pvaultHistoryDB = std::make_unique<CVaultHistoryStorage>(GetDataDir() / "vault", nCacheSizes.customCacheSize, false, fReset || fReindexChainState);
                 }
 
                 // If necessary, upgrade from older database format.
@@ -1844,6 +1898,20 @@ bool AppInitMain(InitInterfaces& interfaces)
                     strLoadError = _("Error upgrading chainstate database").translated;
                     break;
                 }
+
+                // Wipe EVM folder on reindex
+                if (fReset || fReindexChainState) {
+                    auto res = XResultStatusLogged(ain_rs_wipe_evm_folder(result));
+                    if (!res) {
+                        return false;
+                    }
+                }
+
+                // All DBs have been initialized. We start the rust core services to ensure that
+                // it's initialized as late as possible, but before anything can start rolling blocks
+                // back or forth. `ReplayBlocks, VerifyDB` etc.
+                auto res = XResultStatusLogged(ain_rs_init_core_services(result));
+                if (!res) return false;
 
                 // ReplayBlocks is a no-op if we cleared the coinsviewdb with -reindex or -reindex-chainstate
                 if (!ReplayBlocks(chainparams, &::ChainstateActive().CoinsDB(), pcustomcsview.get())) {
@@ -1899,54 +1967,6 @@ bool AppInitMain(InitInterfaces& interfaces)
                     break;
                 }
             }
-
-            /* Start the ETH RPC and gRPC servers. Current API only allows for one ETH
-             * RPC/gRPC server to bind to one address. By default, we will only take
-             * the first address, if multiple addresses are specified.
-            */
-            int eth_rpc_port = gArgs.GetArg("-ethrpcport", BaseParams().ETHRPCPort());
-            int grpc_port = gArgs.GetArg("-grpcport", BaseParams().GRPCPort());
-            std::vector<std::pair<std::string, uint16_t> > eth_endpoints;
-            std::vector<std::pair<std::string, uint16_t> > g_endpoints;
-
-            // Determine which addresses to bind to ETH RPC server
-            if (!(gArgs.IsArgSet("-rpcallowip") && gArgs.IsArgSet("-ethrpcbind"))) { // Default to loopback if not allowing external IPs
-                eth_endpoints.emplace_back("127.0.0.1", eth_rpc_port);
-                if (gArgs.IsArgSet("-rpcallowip")) {
-                    LogPrintf("WARNING: option -rpcallowip was specified without -ethrpcbind; this doesn't usually make sense\n");
-                }
-                if (gArgs.IsArgSet("-ethrpcbind")) {
-                    LogPrintf("WARNING: option -ethrpcbind was ignored because -rpcallowip was not specified, refusing to allow everyone to connect\n");
-                }
-            } else if (gArgs.IsArgSet("-ethrpcbind")) { // Specific bind address
-                for (const std::string& strETHRPCBind : gArgs.GetArgs("-ethrpcbind")) {
-                    int port = eth_rpc_port;
-                    std::string host;
-                    SplitHostPort(strETHRPCBind, port, host);
-                    eth_endpoints.emplace_back(host, port);
-                }
-            }
-
-            // Determine which addresses to bind to gRPC server
-            if (!(gArgs.IsArgSet("-rpcallowip") && gArgs.IsArgSet("-grpcbind"))) { // Default to loopback if not allowing external IPs
-                g_endpoints.emplace_back("127.0.0.1", grpc_port);
-                if (gArgs.IsArgSet("-rpcallowip")) {
-                    LogPrintf("WARNING: option -rpcallowip was specified without -grpcbind; this doesn't usually make sense\n");
-                }
-                if (gArgs.IsArgSet("-grpcbind")) {
-                    LogPrintf("WARNING: option -grpcbind was ignored because -rpcallowip was not specified, refusing to allow everyone to connect\n");
-                }
-            } else if (gArgs.IsArgSet("-grpcbind")) { // Specific bind address
-                for (const std::string& strGRPCBind : gArgs.GetArgs("-grpcbind")) {
-                    int port = grpc_port;
-                    std::string host;
-                    SplitHostPort(strGRPCBind, port, host);
-                    g_endpoints.emplace_back(host, port);
-                }
-            }
-
-            // Default to using the first address passed to bind to ETH RPC server and gRPC server
-            start_servers(eth_endpoints[0].first + ":" + std::to_string(eth_endpoints[0].second), g_endpoints[0].first + "." + std::to_string(g_endpoints[0].second));
 
             try {
                 LOCK(cs_main);
@@ -2017,25 +2037,25 @@ bool AppInitMain(InitInterfaces& interfaces)
         ::feeEstimator.Read(est_filein);
     fFeeEstimatesInitialized = true;
 
-    // ********************************************************* Step 8: start indexers
+    // ********************************************************* Step 9: start indexers
     if (gArgs.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {
-        g_txindex = std::make_unique<TxIndex>(nTxIndexCache, false, fReindex);
+        g_txindex = std::make_unique<TxIndex>(nCacheSizes.txIndexCache, false, fReindex);
         g_txindex->Start();
     }
 
     for (const auto& filter_type : g_enabled_filter_types) {
-        InitBlockFilterIndex(filter_type, filter_index_cache, false, fReindex);
+        InitBlockFilterIndex(filter_type, nCacheSizes.filterIndexCache, false, fReindex);
         GetBlockFilterIndex(filter_type)->Start();
     }
 
-    // ********************************************************* Step 9.a: load wallet
+    // ********************************************************* Step 10.a: load wallet
     for (const auto& client : interfaces.chain_clients) {
         if (!client->load()) {
             return false;
         }
     }
 
-    // ********************************************************* Step 9.b: load anchors / SPV wallet
+    // ********************************************************* Step 10.b: load anchors / SPV wallet
 
     try {
         LOCK(cs_main);
@@ -2044,11 +2064,11 @@ bool AppInitMain(InitInterfaces& interfaces)
         panchorauths = std::make_unique<CAnchorAuthIndex>();
         panchorAwaitingConfirms.reset();
         panchorAwaitingConfirms = std::make_unique<CAnchorAwaitingConfirms>();
-        SetupAnchorSPVDatabases(gArgs.GetBoolArg("-spv_resync", fReindex || fReindexChainState), nCustomCacheSize);
+        SetupAnchorSPVDatabases(gArgs.GetBoolArg("-spv_resync", fReindex || fReindexChainState), nCacheSizes.customCacheSize);
 
         // Check if DB version changed
         if (spv::pspv && SPV_DB_VERSION != spv::pspv->GetDBVersion()) {
-            SetupAnchorSPVDatabases(true, nCustomCacheSize);
+            SetupAnchorSPVDatabases(true, nCacheSizes.customCacheSize);
             assert(spv::pspv->SetDBVersion() == SPV_DB_VERSION);
             LogPrintf("Cleared anchor and SPV database. SPV DB version set to %d\n", SPV_DB_VERSION);
         }
@@ -2063,7 +2083,7 @@ bool AppInitMain(InitInterfaces& interfaces)
         return InitError("Error opening SPV database");
     }
 
-    // ********************************************************* Step 10: data directory maintenance
+    // ********************************************************* Step 11: data directory maintenance
 
     // if pruning, unset the service bit and perform the initial blockstore prune
     // after any wallet rescanning has taken place.
@@ -2121,7 +2141,7 @@ bool AppInitMain(InitInterfaces& interfaces)
         pcustomcsview->Flush();
     }
 
-    // ********************************************************* Step 11: import blocks
+    // ********************************************************* Step 12: import blocks
 
     if (!CheckDiskSpace(GetDataDir())) {
         InitError(strprintf(_("Error: Disk space is low for %s").translated, GetDataDir()));
@@ -2169,7 +2189,8 @@ bool AppInitMain(InitInterfaces& interfaces)
         return false;
     }
 
-    // ********************************************************* Step 12: start node
+    // ********************************************************* Step 13: start node
+
 
     int chain_active_height;
 
@@ -2244,9 +2265,22 @@ bool AppInitMain(InitInterfaces& interfaces)
         return false;
     }
 
-    // ********************************************************* Step 13: finished
+    // ********************************************************* Step 14: finished
 
     SetRPCWarmupFinished();
+    // Start the GRPC and ETH RPC servers
+    // We start the evm RPC servers as late as possible.
+    {
+        std::vector<std::pair<std::string, uint16_t>> eth_endpoints;
+        std::vector<std::pair<std::string, uint16_t>> g_endpoints;
+        SetupRPCPorts(eth_endpoints, g_endpoints);
+        // Default to using the first address passed to bind
+        auto eth_endpoint = eth_endpoints[0].first + ":" + std::to_string(eth_endpoints[0].second);
+        auto websockets_endpoint = eth_endpoints[1].first + ":" + std::to_string(eth_endpoints[1].second);
+        auto grpc_endpoint = g_endpoints[0].first + "." + std::to_string(g_endpoints[0].second);
+        auto res = XResultStatusLogged(ain_rs_init_network_services(result, eth_endpoint, grpc_endpoint, websockets_endpoint));
+        if (!res) return false;
+    }
     uiInterface.InitMessage(_("Done loading").translated);
 
     for (const auto& client : interfaces.chain_clients) {
@@ -2271,8 +2305,8 @@ bool AppInitMain(InitInterfaces& interfaces)
         const auto time{std::time(nullptr)};
 
         auto pwallet = GetWallets()[0];
-        pwallet->SetAddressBook(dest, "", "receive");
-        pwallet->ImportPrivKeys({{keyID, {key, false}}}, time);
+        pwallet->SetAddressBook(dest, "receive", "receive");
+        pwallet->ImportPrivKeys({{keyID, key}}, time);
 
         // Create masternode
         CMasternode node;
@@ -2294,7 +2328,7 @@ bool AppInitMain(InitInterfaces& interfaces)
         spv::pspv->Connect();
     }
 
-    // ********************************************************* Step 14: start minter thread
+    // ********************************************************* Step 15: start minter thread
     if(gArgs.GetBoolArg("-gen", DEFAULT_GENERATE)) {
         LOCK(cs_main);
 
@@ -2326,9 +2360,7 @@ bool AppInitMain(InitInterfaces& interfaces)
             auto& coinbaseScript = stakerParams.coinbaseScript;
 
             CTxDestination destination = DecodeDestination(op);
-            operatorId = destination.index() == PKHashType ? CKeyID(std::get<PKHash>(destination)) :
-                         destination.index() == WitV0KeyHashType ? CKeyID(std::get<WitnessV0KeyHash>(destination)) : CKeyID();
-
+            operatorId = CKeyID::FromOrDefaultDestination(destination, KeyType::MNOperatorKeyType);
             if (operatorId.IsNull()) {
                 LogPrintf("Error: wrong masternode_operator address (%s)\n", op);
                 continue;
@@ -2359,11 +2391,9 @@ bool AppInitMain(InitInterfaces& interfaces)
             if (optMasternodeID) {
                 auto nodePtr = pcustomcsview->GetMasternode(*optMasternodeID);
                 assert(nodePtr); // this should not happen if MN was found by operator's id
-                ownerDest = nodePtr->ownerType == PKHashType ?
-                    CTxDestination(PKHash(nodePtr->ownerAuthAddress)) :
-                    CTxDestination(WitnessV0KeyHash(nodePtr->ownerAuthAddress));
+                ownerDest = FromOrDefaultKeyIDToDestination(nodePtr->ownerAuthAddress, TxDestTypeToKeyType(nodePtr->ownerType), KeyType::MNOwnerKeyType);
                 if (nodePtr->rewardAddressType != 0) {
-                    rewardDest = nodePtr->GetRewardAddressDestination();
+                    rewardDest = FromOrDefaultKeyIDToDestination(nodePtr->rewardAddress, TxDestTypeToKeyType(nodePtr->rewardAddressType), KeyType::MNRewardKeyType);
                 }
             }
 
@@ -2380,7 +2410,7 @@ bool AppInitMain(InitInterfaces& interfaces)
                 LogPrintf("Minting thread will start with default address %s\n", EncodeDestination(ownerDest));
             }
             else {
-                LogPrintf("Minting thread will start with empty coinbase address cause masternode does not exist yet. Correct address will be resolved later.\n");
+                LogPrintf("Minting thread will start with empty coinbase address because masternode does not exist yet. Correct address will be resolved later.\n");
             }
             stakersParams.push_back(std::move(stakerParams));
             atLeastOneRunningOperator = true;

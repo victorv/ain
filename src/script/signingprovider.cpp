@@ -69,10 +69,9 @@ FlatSigningProvider Merge(const FlatSigningProvider& a, const FlatSigningProvide
     return ret;
 }
 
-void FillableSigningProvider::ImplicitlyLearnRelatedKeyScripts(const CPubKey& pubkey, const bool ethAddress)
+void FillableSigningProvider::ImplicitlyLearnRelatedKeyScripts(const CPubKey& pubkey)
 {
     AssertLockHeld(cs_KeyStore);
-    CKeyID key_id = pubkey.GetID();
     // This adds the redeemscripts necessary to detect P2WPKH and P2SH-P2WPKH
     // outputs. Technically P2WPKH outputs don't have a redeemscript to be
     // spent. However, our current IsMine logic requires the corresponding
@@ -84,16 +83,13 @@ void FillableSigningProvider::ImplicitlyLearnRelatedKeyScripts(const CPubKey& pu
     // "Implicitly" refers to fact that scripts are derived automatically from
     // existing keys, and are present in memory, even without being explicitly
     // loaded (e.g. from a file).
-    if (ethAddress) {
-        auto script = GetScriptForDestination(WitnessV16EthHash(pubkey));
-        CScriptID id(script);
-        mapScripts[id] = std::move(script);
-    } else if (pubkey.IsCompressed()) {
-        CScript script = GetScriptForDestination(WitnessV0KeyHash(key_id));
-        // This does not use AddCScript, as it may be overridden.
-        CScriptID id(script);
-        mapScripts[id] = std::move(script);
-    }
+    auto [uncomp, comp] = GetBothPubkeyCompressions(pubkey);
+    auto script = GetScriptForDestination(WitnessV16EthHash(uncomp));
+    auto witScript = GetScriptForDestination(WitnessV0KeyHash(comp));
+    CScriptID id(script);
+    CScriptID witId(witScript);
+    mapScripts[id] = std::move(script);
+    mapScripts[witId] = std::move(witScript);
 }
 
 bool FillableSigningProvider::GetPubKey(const CKeyID &address, CPubKey &vchPubKeyOut) const
@@ -102,19 +98,26 @@ bool FillableSigningProvider::GetPubKey(const CKeyID &address, CPubKey &vchPubKe
     if (!GetKey(address, key)) {
         return false;
     }
-    vchPubKeyOut = key.GetPubKey();
+    auto pubkey = key.GetPubKey();
+    if (!pubkey.IsCompressed() && address.type == KeyAddressType::COMPRESSED) {
+        pubkey.Compress();
+    } else if (pubkey.IsCompressed() && address.type == KeyAddressType::UNCOMPRESSED) {
+        pubkey.Decompress();
+    }
+    vchPubKeyOut = pubkey;
     return true;
 }
 
-bool FillableSigningProvider::AddKeyPubKey(const CKey& key, const CPubKey &pubkey, const bool ethAddress)
+bool FillableSigningProvider::AddKeyPair(const CKey& key, const CPubKey &pubkey)
 {
     LOCK(cs_KeyStore);
-    mapKeys[pubkey.GetID()] = key;
-    if (ethAddress) {
-        mapKeys[pubkey.GetEthID()] = key;
-        mapEthKeys[pubkey.GetEthID()] = key;
-    }
-    ImplicitlyLearnRelatedKeyScripts(pubkey, ethAddress);
+
+    auto [uncomp, comp] = GetBothPubkeyCompressions(pubkey);
+    mapKeys[uncomp.GetID()] = key;
+    mapKeys[uncomp.GetEthID()] = key;
+    mapKeys[comp.GetID()] = key;
+
+    ImplicitlyLearnRelatedKeyScripts(pubkey);
     return true;
 }
 
@@ -134,32 +137,11 @@ std::set<CKeyID> FillableSigningProvider::GetKeys() const
     return set_address;
 }
 
-std::set<CKeyID> FillableSigningProvider::GetEthKeys() const
-{
-    LOCK(cs_KeyStore);
-    std::set<CKeyID> set_address;
-    for (const auto& mi : mapEthKeys) {
-        set_address.insert(mi.first);
-    }
-    return set_address;
-}
-
 bool FillableSigningProvider::GetKey(const CKeyID &address, CKey &keyOut) const
 {
     LOCK(cs_KeyStore);
     KeyMap::const_iterator mi = mapKeys.find(address);
     if (mi != mapKeys.end()) {
-        keyOut = mi->second;
-        return true;
-    }
-    return false;
-}
-
-bool FillableSigningProvider::GetEthKey(const CKeyID &address, CKey &keyOut) const
-{
-    LOCK(cs_KeyStore);
-    auto mi = mapEthKeys.find(address);
-    if (mi != mapEthKeys.end()) {
         keyOut = mi->second;
         return true;
     }
@@ -204,28 +186,33 @@ bool FillableSigningProvider::GetCScript(const CScriptID &hash, CScript& redeemS
     return false;
 }
 
-CKeyID GetKeyForDestination(const SigningProvider& store, const CTxDestination& dest)
+CKeyID GetKeyOrDefaultFromDestination(const SigningProvider& store, const CTxDestination& dest)
 {
     // Only supports destinations which map to single public keys, i.e. P2PKH,
     // P2WPKH, and P2SH-P2WPKH.
-    if (auto id = std::get_if<PKHash>(&dest)) {
-        return CKeyID(*id);
-    }
-    if (auto witness_id = std::get_if<WitnessV0KeyHash>(&dest)) {
-        return CKeyID(*witness_id);
-    }
-    if (auto witness_id = std::get_if<WitnessV16EthHash>(&dest)) {
-        return CKeyID(*witness_id);
-    }
-    if (auto script_hash = std::get_if<ScriptHash>(&dest)) {
-        CScript script;
-        CScriptID script_id(*script_hash);
-        CTxDestination inner_dest;
-        if (store.GetCScript(script_id, script) && ExtractDestination(script, inner_dest)) {
-            if (auto inner_witness_id = std::get_if<WitnessV0KeyHash>(&inner_dest)) {
-                return CKeyID(*inner_witness_id);
-            }
+    auto id = CKeyID::FromOrDefaultDestination(dest);
+    auto dest_type = TxDestTypeToKeyType(dest.index()) & KeyType::SigningProviderType;
+    switch (dest_type) {
+        case KeyType::WPKHashKeyType: {
+            id.type = KeyAddressType::COMPRESSED;
+            break;
         }
+        case KeyType::EthHashKeyType: {
+            id.type = KeyAddressType::UNCOMPRESSED;
+            break;
+        }
+        case KeyType::ScriptHashKeyType: {
+            CScript script;
+            CScriptID script_id(id);
+            CTxDestination inner_dest;
+            if (!store.GetCScript(script_id, script) || !ExtractDestination(script, inner_dest)) {
+                return {};
+            }
+            id = CKeyID::FromOrDefaultDestination(inner_dest, KeyType::WPKHashKeyType);
+            break;
+        }
+        default:
+            break;
     }
-    return {};
+    return id;
 }

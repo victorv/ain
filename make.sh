@@ -13,7 +13,7 @@ setup_vars() {
     GIT_VERSION=${GIT_VERSION:-0}
     if [[ "$GIT_VERSION" == 1 ]]; then
         IMAGE_VERSION=${IMAGE_VERSION:-"$(git_version 0)"}
-    else 
+    else
         IMAGE_VERSION=${IMAGE_VERSION:-"latest"}
     fi
 
@@ -33,22 +33,23 @@ setup_vars() {
     BUILD_TARGET_DIR="${BUILD_DIR}"
     BUILD_DEPENDS_DIR=${BUILD_DEPENDS_DIR:-"${BUILD_DIR}/depends"}
     BUILD_DEPENDS_DIR="$(_canonicalize "$BUILD_DEPENDS_DIR")"
+    PYTHON_VENV_DIR=${PYTHON_VENV_DIR:-"${BUILD_DIR}/pyenv"}
 
     CLANG_DEFAULT_VERSION=${CLANG_DEFAULT_VERSION:-"15"}
-    RUST_DEFAULT_VERSION=${RUST_DEFAULT_VERSION:-"1.70"}
-    
-    MAKE_DEBUG=${MAKE_DEBUG:-"1"}
+    RUST_DEFAULT_VERSION=${RUST_DEFAULT_VERSION:-"1.72"}
 
-    local default_compiler_flags=""
-    if [[ "${TARGET}" == "x86_64-pc-linux-gnu" ]]; then
+    MAKE_DEBUG=${MAKE_DEBUG:-"1"}
+    MAKE_USE_CLANG=${MAKE_USE_CLANG:-"$(get_default_use_clang)"}
+
+    if [[ "${MAKE_USE_CLANG}" == "1" ]]; then
         local clang_ver="${CLANG_DEFAULT_VERSION}"
-        default_compiler_flags="CC=clang-${clang_ver} CXX=clang++-${clang_ver}"
+        export CC=clang-${clang_ver}
+        export CXX=clang++-${clang_ver}
     fi
 
     MAKE_JOBS=${MAKE_JOBS:-"$(get_default_jobs)"}
 
     MAKE_CONF_ARGS="$(get_default_conf_args) ${MAKE_CONF_ARGS:-}"
-    MAKE_CONF_ARGS="${default_compiler_flags} ${MAKE_CONF_ARGS:-}"
     if [[ "${MAKE_DEBUG}" == "1" ]]; then
       MAKE_CONF_ARGS="${MAKE_CONF_ARGS} --enable-debug";
     fi
@@ -60,6 +61,9 @@ setup_vars() {
 
     MAKE_ARGS=${MAKE_ARGS:-}
     MAKE_DEPS_ARGS=${MAKE_DEPS_ARGS:-}
+    TESTS_FAILFAST=${TESTS_FAILFAST:-"0"}
+    TESTS_COMBINED_LOGS=${TESTS_COMBINED_LOGS:-"0"}
+    CI_GROUP_LOGS=${CI_GROUP_LOGS:-"$(get_default_ci_group_logs)"}
 }
 
 main() {
@@ -107,7 +111,7 @@ help() {
     printf "\n\`%s build\` or \`%s docker-build\` are your friends :) \n" "$0" "$0"
     printf "\nCommands:\n"
     printf "\t%s\n" "${COMMANDS[@]//_/-}"
-    printf "\nNote: All commands without docker-* prefix assume that it's run in\n" 
+    printf "\nNote: All commands without docker-* prefix assume that it's run in\n"
     printf "an environment with correct arch and pre-requisites configured. \n"
     printf "(most pre-requisites can be installed with pkg-* commands). \n"
 }
@@ -122,12 +126,12 @@ build_deps() {
     local build_depends_dir=${BUILD_DEPENDS_DIR}
 
     echo "> build-deps: target: ${target} / deps_args: ${make_deps_args} / jobs: ${make_jobs}"
-    
+
     _ensure_enter_dir "$build_depends_dir"
     if [[ "$target" =~ .*darwin.* ]]; then
         pkg_local_ensure_osx_sysroot
     fi
-    
+
     _fold_start "build-deps"
 
     # shellcheck disable=SC2086
@@ -200,7 +204,7 @@ deploy() {
     echo "> deploy into: ${build_dir} from ${versioned_build_path}"
 
     _safe_rm_rf "${versioned_build_path}" && mkdir -p "${versioned_build_path}"
-    
+
     make -C "${build_target_dir}" prefix=/ DESTDIR="${versioned_build_path}" \
         install && cp README.md "${versioned_build_path}/"
 
@@ -323,7 +327,243 @@ _docker_clean() {
         --force 2>/dev/null || true
 }
 
+# Python helpers
+# ---
+
+py_ensure_env_active() {
+    pkg_local_ensure_py_deps
+    py_env_activate
+}
+
+py_env_activate() {
+  local python_venv="${PYTHON_VENV_DIR}"
+  python3 -m venv "${python_venv}"
+  # shellcheck disable=SC1091
+  source "${python_venv}/bin/activate"
+}
+
+py_env_deactivate() {
+  deactivate
+}
+
 # -------------- Misc -----------------
+
+
+# check
+# ---
+
+check() {
+    check_git_dirty
+    check_sh
+    check_py
+    check_rs
+    # check_lints
+    check_cpp
+}
+
+check_git_dirty() {
+    if [[ $(git status -s) ]]; then
+        echo "error: Git tree dirty. Please commit or stash first"
+        exit 1
+    fi
+}
+
+check_py() {
+    py_ensure_env_active
+    _exec_black 1
+    # TODO Add flake as well
+    py_env_deactivate 
+}
+
+check_rs() {
+    lib clippy 1
+    lib fmt-check 1
+}
+
+check_lints() {
+    py_ensure_env_active
+    _fold_start "check-doc"
+    test/lint/check-doc.py
+    _fold_end
+
+    # _fold_start "check-rpc-mappings"
+    # test/lint/check-rpc-mappings.py .
+    # _fold_end
+
+    test/lint/lint-all.sh
+    py_env_deactivate
+}
+
+check_sh() {
+    py_ensure_env_active
+
+    # TODO: Remove most of the specific ignores after resolving them
+    # shellcheck disable=SC2086
+    find . -not \( -path ./build -prune \
+        -or -path ./autogen.sh \
+        -or -path ./test/lint/lint-python.sh \
+        -or -path ./test/lint/lint-rpc-help.sh \
+        -or -path ./test/lint/lint-shell.sh \
+        -or -path ./test/lint/disabled-lint-spelling.sh \
+        -or -path ./test/lint/commit-script-check.sh \
+        -or -path ./test/lint/lint-includes.sh \
+        -or -path ./test/lint/lint-python-dead-code.sh \
+        -or -path ./src/univalue -prune \
+        -or -path ./src/secp256k1 -prune \
+        -or -path ./build\* \)  -name '*.sh' -print0 | xargs -0L1 shellcheck
+
+    py_env_deactivate
+}
+
+check_cpp() {
+    _run_clang_format 1
+}
+
+check_enter_build_rs_dir() {
+    local build_dir="${BUILD_DIR}"
+    _ensure_enter_dir "$build_dir/lib" || { 
+        echo "Please configure first";
+        exit 1; }
+}
+
+
+# fmt
+# ---
+
+fmt() {
+    fmt_py
+    fmt_lib
+    fmt_cpp
+}
+
+fmt_py() {
+    echo "> fmt: py"
+    py_ensure_env_active
+    _exec_black
+    py_env_deactivate
+}
+
+fmt_rs() {
+    fmt_lib
+}
+
+fmt_cpp() {
+    echo "> fmt: cpp"
+    _run_clang_format 0
+}
+
+_run_clang_format() {
+    local check_only=${1:-0}
+    local clang_ver=${CLANG_DEFAULT_VERSION}
+    local clang_formatters=("clang-format-${clang_ver}" "clang-format")
+    local index=-1
+    local fmt_args=""
+
+    for ((idx=0; idx<${#clang_formatters[@]}; ++idx)); do
+        if "${clang_formatters[$idx]}" --version &> /dev/null; then 
+            index="$idx"
+            break
+        fi
+    done
+    if [[ "$index" == -1 ]]; then
+        echo "clang-format(-${clang_ver}) required" 
+        exit 1
+    fi
+
+    if [[ "$check_only" == 1 ]]; then
+        fmt_args="--dry-run --Werror"
+    fi 
+
+    # shellcheck disable=SC2086
+    find src/dfi \( -iname "*.cpp" -o -iname "*.h" \) -print0 | \
+        xargs -0 -I{} "${clang_formatters[$index]}" $fmt_args -i -style=file {}
+}
+
+fmt_lib() {
+    echo "> fmt: rs"
+    check_enter_build_rs_dir
+    lib fmt
+    _exit_dir
+}
+
+# tests
+# ---
+
+test() {
+    _fold_start "unit-tests"
+    # shellcheck disable=SC2086
+    test_unit "$@"
+    _fold_end
+
+    _fold_start "functional-tests"
+    # shellcheck disable=SC2119
+    test_py
+    _fold_end
+}
+
+test_unit() {
+    test_cpp "$@"
+    test_rs "$@"
+}
+
+test_cpp() {
+    local make_jobs=${MAKE_JOBS}
+    local make_args=${MAKE_ARGS:-}
+    local build_target_dir=${BUILD_TARGET_DIR}
+
+    _ensure_enter_dir "${build_target_dir}"
+    # shellcheck disable=SC2086
+    make -j$make_jobs check "$@"
+    _exit_dir
+}
+
+test_rs() {
+    lib test "$@"
+}
+
+# shellcheck disable=SC2120
+test_py() {
+    local build_target_dir=${BUILD_TARGET_DIR}
+    local src_dir=${_SCRIPT_DIR}
+    local tests_fail_fast=${TESTS_FAILFAST}
+    local tests_combined_logs=${TESTS_COMBINED_LOGS}
+    local make_jobs=${MAKE_JOBS}
+    local extra_args=""
+    local first_arg="${1:-}"
+
+    # If an argument is given as an existing file, we switch that
+    # out to the last arg
+    if [[ -f "${first_arg}" ]]; then
+      shift
+    elif [[ -f "${src_dir}/test/functional/${first_arg}" ]]; then
+      first_arg="${src_dir}/test/functional/${first_arg}"
+      shift
+    else
+      # We don't shift, this just ends up in the $@ args
+      first_arg=""
+    fi
+
+    if [[ "$tests_fail_fast" == "1" ]]; then
+        extra_args="--failfast"
+    fi
+
+    _ensure_enter_dir "${build_target_dir}"
+    py_ensure_env_active
+
+    # shellcheck disable=SC2086
+    (set -x; python3 ${build_target_dir}/test/functional/test_runner.py \
+        --tmpdirprefix="./test_runner/" \
+        --ansi \
+        --configfile="${build_target_dir}/test/config.ini" \
+        --jobs=${make_jobs} \
+        --combinedlogslen=${tests_combined_logs} \
+        ${extra_args} ${first_arg} "$@")
+
+    py_env_deactivate
+    _exit_dir
+}
+
+# Others
 
 debug_env() {
     (set -o posix ; set)
@@ -332,44 +572,6 @@ debug_env() {
     gcc -v
     "clang-${CLANG_DEFAULT_VERSION}" -v
     rustup show)
-}
-
-test() {
-    local make_jobs=${MAKE_JOBS}
-    local make_args=${MAKE_ARGS:-}
-    local build_target_dir=${BUILD_TARGET_DIR}
-
-    _ensure_enter_dir "${build_target_dir}"
-
-    _fold_start "unit-tests"
-    # shellcheck disable=SC2086
-    make -j$make_jobs check
-    _fold_end
-
-    _fold_start "functional-tests"
-    # shellcheck disable=SC2086
-    ./test/functional/test_runner.py --ci -j$make_jobs --tmpdirprefix "./test_runner/" --ansi --combinedlogslen=10000
-    _fold_end
-
-    _exit_dir
-}
-
-test_py() {
-    local build_target_dir=${BUILD_TARGET_DIR}
-    local first_arg="${1:-}"
-
-    if [[ -f "${first_arg}" ]]; then
-      shift
-      "${first_arg}" --configfile "${build_target_dir}/test/config.ini" --tmpdirprefix "./test_runner/" --ansi "$@"
-      return
-    fi
-
-    _ensure_enter_dir "${build_target_dir}"
-
-    # shellcheck disable=SC2086
-    ./test/functional/test_runner.py --tmpdirprefix "./test_runner/" --ansi "$@"
-
-    _exit_dir
 }
 
 exec() {
@@ -413,7 +615,7 @@ git_version() {
         fi
     fi
 
-    if [[ "$verbose" == "1" ]]; then 
+    if [[ "$verbose" == "1" ]]; then
         echo "> git branch: ${current_branch}"
         echo "> version: ${ver}"
     else
@@ -427,7 +629,7 @@ git_version() {
 # - pkg_install_*: for installing packages (system level)
 # - pkg_update_*: distro update only
 # - pkg_local_*: for pulling packages into the local dir
-#   - clean_pkg_local*: Make sure to have the opp. 
+#   - clean_pkg_local*: Make sure to have the opp.
 # - pkg_setup*: setup of existing (or installed) pkgs // but not installing now
 
 
@@ -437,7 +639,7 @@ pkg_update_base() {
     apt-get update
     apt-get install -y apt-transport-https
     apt-get upgrade -y
-    
+
     _fold_end
 }
 
@@ -446,9 +648,10 @@ pkg_install_deps() {
 
     # gcc-multilib: for cross compilations
     # locales: for using en-US.UTF-8 (see head of this file).
+    # python3-venv for settings up all python deps
     apt-get install -y \
         software-properties-common build-essential git libtool autotools-dev automake \
-        pkg-config bsdmainutils python3 python3-pip libssl-dev libevent-dev libboost-system-dev \
+        pkg-config bsdmainutils python3 python3-pip python3-venv libssl-dev libevent-dev libboost-system-dev \
         libboost-filesystem-dev libboost-chrono-dev libboost-test-dev libboost-thread-dev \
         libminiupnpc-dev libzmq3-dev libqrencode-dev wget \
         libdb-dev libdb++-dev libdb5.3 libdb5.3-dev libdb5.3++ libdb5.3++-dev \
@@ -465,7 +668,7 @@ pkg_setup_locale() {
 
 pkg_install_deps_mingw_x86_64() {
     _fold_start "pkg-install-deps-mingw-x86_64"
-    
+
     apt-get install -y \
         g++-mingw-w64-x86-64 mingw-w64-x86-64-dev
 
@@ -504,29 +707,6 @@ pkg_install_deps_osx_tools() {
     _fold_end
 }
 
-pkg_local_ensure_osx_sysroot() {
-    local sdk_name="Xcode-12.2-12B45b-extracted-SDK-with-libcxx-headers"
-    local pkg="${sdk_name}.tar.gz"
-    local build_depends_dir="${BUILD_DEPENDS_DIR}"
-    local sdk_base_dir="$build_depends_dir/SDKs"
-
-    if [[ -d "${sdk_base_dir}/${sdk_name}" ]]; then 
-        return
-    fi
-
-    _fold_start "pkg-local-mac-sdk"
-
-    _ensure_enter_dir "${sdk_base_dir}"
-    if [[ ! -f "${pkg}" ]]; then 
-        wget https://bitcoincore.org/depends-sources/sdks/${pkg}
-    fi
-    _tar -zxf "${pkg}"
-    rm "${pkg}" 2>/dev/null || true
-    _exit_dir
-
-    _fold_end
-}
-
 pkg_install_llvm() {
     _fold_start "pkg-install-llvm"
     # shellcheck disable=SC2086
@@ -541,23 +721,71 @@ pkg_install_rust() {
     _fold_end
 }
 
-pkg_install_web3_deps() {
-    _fold_start "pkg-install-solc"
-    python3 -m pip install py-solc-x web3
-    python3 -c 'from solcx import install_solc;install_solc("0.8.20")'
-    _fold_end
-}
+pkg_local_ensure_osx_sysroot() {
+    local sdk_name="Xcode-12.2-12B45b-extracted-SDK-with-libcxx-headers"
+    local pkg="${sdk_name}.tar.gz"
+    local build_depends_dir="${BUILD_DEPENDS_DIR}"
+    local sdk_base_dir="$build_depends_dir/SDKs"
 
-pkg_setup_rust() {
-    local rust_target
-    rust_target=$(get_rust_target)
-    rustup target add "${rust_target}"
+    if [[ -d "${sdk_base_dir}/${sdk_name}" ]]; then
+        return
+    fi
+
+    _fold_start "pkg-local-mac-sdk"
+
+    _ensure_enter_dir "${sdk_base_dir}"
+    if [[ ! -f "${pkg}" ]]; then
+        wget https://bitcoincore.org/depends-sources/sdks/${pkg}
+    fi
+    _tar -zxf "${pkg}"
+    rm "${pkg}" 2>/dev/null || true
+    _exit_dir
+
+    _fold_end
 }
 
 clean_pkg_local_osx_sysroot() {
     local build_depends_dir="${BUILD_DEPENDS_DIR}"
     _safe_rm_rf "$build_depends_dir/SDKs"
 }
+
+pkg_local_ensure_py_deps() {
+    local python_venv="${PYTHON_VENV_DIR}"
+    if [[ -d "${python_venv}" ]]; then
+        return
+    fi
+    pkg_local_install_py_deps
+}
+
+pkg_local_install_py_deps() {
+    _fold_start "pkg-install-py-deps"
+    py_env_activate
+
+    # lints, fmt, checks deps
+    python3 -m pip install black shellcheck-py codespell==2.2.4 flake8==6.0.0 vulture==2.7
+
+    # test deps
+    python3 -m pip install py-solc-x web3
+    python3 -c 'from solcx import install_solc;install_solc("0.8.20")'
+
+    py_env_deactivate
+    _fold_end
+}
+
+clean_pkg_local_py_deps() {
+  local python_venv="${PYTHON_VENV_DIR}"
+  _safe_rm_rf "${python_venv}"
+}
+
+pkg_setup_rust() {
+    local rust_target
+    # shellcheck disable=SC2119
+    rust_target=$(get_rust_triplet)
+    rustup target add "${rust_target}"
+}
+
+# Clean
+# ---
 
 purge() {
     local build_dir="${BUILD_DIR}"
@@ -573,11 +801,11 @@ purge() {
 
 clean_artifacts() {
     # If build is done out of tree, this is not needed at all. But when done
-    # in-tree, or helper tools that end up running configure in-tree, this is 
-    # a helpful method to clean up left overs. 
+    # in-tree, or helper tools that end up running configure in-tree, this is
+    # a helpful method to clean up left overs.
     local items=(\
         .libs .deps obj "*.dirstamp" "*.a" "*.o" "*.Po" "*.lo")
-    
+
     local x
     for x in "${items[@]}"; do
         find src -iname "$x" -exec rm -rf \;
@@ -654,7 +882,7 @@ clean() {
 }
 
 # ========
-# Internal Support methods
+# Support methods
 # ========
 
 # Defaults
@@ -673,12 +901,12 @@ get_default_target() {
     elif [[ "${OSTYPE}" == "msys" ]]; then
         default_target="x86_64-w64-mingw32"
     else
-        # Note: make.sh only formally supports auto selection for 
+        # Note: make.sh only formally supports auto selection for
         # windows under msys, mac os and debian derivatives to build on.
         # Also note: Support for auto selection on make.sh does not imply
-        # support for the architecture. 
+        # support for the architecture.
         # Only supported architectures are the ones with release builds
-        # enabled on the CI. 
+        # enabled on the CI.
         local dpkg_arch=""
         dpkg_arch=$(dpkg --print-architecture || true)
         if [[ "$dpkg_arch" == "armhf" ]]; then
@@ -686,7 +914,7 @@ get_default_target() {
         elif [[ "$dpkg_arch" == "aarch64" ]]; then
             default_target="aarch64-linux-gnu"
         else
-            # Global default if we can't determine it from the 
+            # Global default if we can't determine it from the
             # above, which are our only supported list for auto select
             default_target="x86_64-pc-linux-gnu"
         fi
@@ -705,13 +933,13 @@ get_default_docker_file() {
         )
 
     for file in "${try_files[@]}"; do
-        if [[ -f "$file" ]]; then 
+        if [[ -f "$file" ]]; then
             echo "$file"
             return
         fi
     done
     # If none of these were found, assumes empty val
-    # Empty will fail if docker cmd requires it, or continue for 
+    # Empty will fail if docker cmd requires it, or continue for
     # non docker cmds
 }
 
@@ -741,6 +969,28 @@ get_default_jobs() {
     fi
 }
 
+get_default_use_clang() {
+    local target=${TARGET}
+    local cc=${CC:-}
+    local cxx=${CXX:-}
+    if [[ -z "${cc}" && -z "${cxx}" ]]; then
+        if [[ "${target}" == "x86_64-pc-linux-gnu" ]]; then
+            echo 1
+            return
+        fi
+    fi
+    echo 0
+    return
+}
+
+get_default_ci_group_logs() {
+    if [[ -n "${GITHUB_ACTIONS-}" ]]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
 # Dev tools
 # ---
 
@@ -748,7 +998,7 @@ get_default_jobs() {
 git_add_hooks() {
     local force_update=${1:-0}
     local file=".git/hooks/pre-push"
-    if [[ -f "$file" && $force_update == "0" ]]; then 
+    if [[ -f "$file" && $force_update == "0" ]]; then
         return;
     fi
     echo "> add pre-push-hook"
@@ -764,66 +1014,14 @@ END
     chmod +x "$file"
 }
 
-check() {
-    check_git_dirty
-    check_rs
-}
 
-check_git_dirty() {
-    if [[ $(git status -s) ]]; then
-        echo "error: Git tree dirty. Please commit or stash first"
-        exit 1
-    fi
-}
-
-check_rs() {
-    check_enter_build_rs_dir
-    lib check 1
-    lib clippy 1
-    lib fmt-check 1
-    _exit_dir
-}
-
-check_enter_build_rs_dir() {
-    local build_dir="${BUILD_DIR}"
-    _ensure_enter_dir "$build_dir/lib" || { 
-        echo "Please configure first";
-        exit 1; }
-}
-
-lib() {
-    local cmd="${1-}"
-    local exit_on_err="${2:-0}"
-    local jobs="$MAKE_JOBS"
-    
-    check_enter_build_rs_dir
-    # shellcheck disable=SC2086
-    make JOBS=${jobs} ${cmd} || { if [[ "${exit_on_err}" == "1" ]]; then  
-        echo "Error: Please resolve all checks"; 
-        exit 1;
-        fi; }
-    _exit_dir
-}
-
-rust_analyzer_check() {
-    lib "check CARGO_EXTRA_ARGS=--all-targets --workspace --message-format=json"
-}
-
-compiledb() {
-    _platform_init_intercept_build
-    clean 2> /dev/null || true
-    build_deps
-    build_conf
-    _intercept_build ./make.sh build_make
-}
-
-# Platform specifics
+# Platform helpers
 # ---
 
 _platform_init() {
     # Lazy init functions
     if [[ $(readlink -m . 2> /dev/null) != "${_SCRIPT_DIR}" ]]; then
-        if [[ $(greadlink -m . 2> /dev/null) != "${_SCRIPT_DIR}" ]]; then 
+        if [[ $(greadlink -m . 2> /dev/null) != "${_SCRIPT_DIR}" ]]; then
             echo "error: readlink or greadlink with \`-m\` support is required"
             _platform_pkg_tip coreutils
             exit 1
@@ -890,14 +1088,16 @@ _nproc() {
     fi
 }
 
-# Misc
+# CI
 # ---
 
+# shellcheck disable=SC2129
 ci_export_vars() {
     if [[ -n "${GITHUB_ACTIONS-}" ]]; then
         # GitHub Actions
         echo "BUILD_VERSION=${IMAGE_VERSION}" >> "$GITHUB_ENV"
         echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
+        echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
     fi
 }
 
@@ -914,11 +1114,11 @@ _ci_setup_deps_target() {
     case $target in
         # Nothing to do on host
         x86_64-pc-linux-gnu) ;;
-        aarch64-linux-gnu) 
+        aarch64-linux-gnu)
             DEBIAN_FRONTEND=noninteractive pkg_install_deps_arm64;;
-        arm-linux-gnueabihf) 
+        arm-linux-gnueabihf)
             DEBIAN_FRONTEND=noninteractive pkg_install_deps_armhf;;
-        x86_64-apple-darwin|aarch64-apple-darwin) 
+        x86_64-apple-darwin|aarch64-apple-darwin)
             DEBIAN_FRONTEND=noninteractive pkg_install_deps_osx_tools;;
         x86_64-w64-mingw32)
             DEBIAN_FRONTEND=noninteractive pkg_install_deps_mingw_x86_64
@@ -934,28 +1134,54 @@ ci_setup_deps_target() {
     pkg_setup_rust
 }
 
-ci_setup_deps_test() {
-    pkg_install_web3_deps
+# Public helpers
+# ---
+
+lib() {
+    local cmd="${1-}"
+    local exit_on_err="${2:-0}"
+    local jobs="$MAKE_JOBS"
+    
+    check_enter_build_rs_dir
+    # shellcheck disable=SC2086
+    make JOBS=${jobs} ${cmd} || { if [[ "${exit_on_err}" == "1" ]]; then  
+        echo "Error: Please resolve all checks"; 
+        exit 1;
+        fi; }
+    _exit_dir
 }
 
-get_rust_target() {
+rust_analyzer_check() {
+    lib "check CARGO_EXTRA_ARGS=--all-targets --workspace --message-format=json"
+}
+
+compiledb() {
+    _platform_init_intercept_build
+    clean 2> /dev/null || true
+    build_deps
+    build_conf
+    _intercept_build ./make.sh build_make
+}
+
+# shellcheck disable=SC2120
+get_rust_triplet() {
     # Note: https://github.com/llvm/llvm-project/blob/master/llvm/lib/TargetParser/Triple.cpp
     # The function is called in 2 places:
     # 1. When setting up Rust, which TARGET is passed from the environment
     # 2. In configure, which sets TARGET with the additional unknown vendor part in the triplet
     # Thus, we normalize across both to source the correct rust target.
-    local target=${TARGET}
-    local rust_target
-    case $target in
-        x86_64-pc-linux-gnu) rust_target=x86_64-unknown-linux-gnu;;
-        aarch64-linux-gnu|aarch64-unknown-linux-gnu) rust_target=aarch64-unknown-linux-gnu;;
-        arm-linux-gnueabihf|arm-unknown-linux-gnueabihf) rust_target=armv7-unknown-linux-gnueabihf;;
-        x86_64-apple-darwin) rust_target=x86_64-apple-darwin;;
-        aarch64-apple-darwin) rust_target=aarch64-apple-darwin;;
-        x86_64-w64-mingw32) rust_target=x86_64-pc-windows-gnu;;
-        *) echo "error: unsupported target: ${target}"; exit 1;;
+    local triplet=${1:-${TARGET}}
+    local result
+    case $triplet in
+        x86_64-pc-linux-gnu) result=x86_64-unknown-linux-gnu;;
+        aarch64-linux-gnu|aarch64-unknown-linux-gnu) result=aarch64-unknown-linux-gnu;;
+        arm-linux-gnueabihf|arm-unknown-linux-gnueabihf) result=armv7-unknown-linux-gnueabihf;;
+        x86_64-apple-darwin*) result=x86_64-apple-darwin;;
+        aarch64-apple-darwin*) result=aarch64-apple-darwin;;
+        x86_64-w64-mingw32) result=x86_64-pc-windows-gnu;;
+        *) echo "error: unsupported triplet: ${triplet}"; exit 1;;
     esac
-    echo "$rust_target"
+    echo "$result"
 }
 
 _sign() {
@@ -963,10 +1189,23 @@ _sign() {
     :
 }
 
+# Internal misc helpers
+# ---
+
+_exec_black() {
+    local is_check=${1:-0}
+    local black_args=""
+    if [[ "${is_check}" == "1" ]]; then
+        black_args="${black_args} --check"
+    fi
+    # shellcheck disable=SC2086,SC2090
+    python3 -m black --extend-exclude 'src/crc32c' ${black_args} .
+}
+
 _safe_rm_rf() {
     local x
     for x in "$@"; do
-        if [[ "$x" =~ ^[[:space:]]*$ || "$x" =~ ^/*$ ]]; then 
+        if [[ "$x" =~ ^[[:space:]]*$ || "$x" =~ ^/*$ ]]; then
             # Safe guard against accidental rm -rfs
             echo "error: unsafe delete attempted"
             exit 1
@@ -976,11 +1215,15 @@ _safe_rm_rf() {
 }
 
 _fold_start() {
-    echo "::group::${*:-}"
+    if [[ "${CI_GROUP_LOGS}" == "1" ]]; then
+        echo "::group::${*:-}";
+    fi
 }
 
 _fold_end() {
-    echo "::endgroup::"
+    if [[ "${CI_GROUP_LOGS}" == "1" ]]; then
+        echo "::endgroup::"
+    fi
 }
 
 _ensure_enter_dir() {

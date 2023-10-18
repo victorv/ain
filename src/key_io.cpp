@@ -62,11 +62,11 @@ public:
     std::string operator()(const WitnessV16EthHash& id) const
     {
         // Raw addr = ETH_ADDR_PREFIX + HexStr(id);
-        // Produce ETH checksum address: https://github.com/ethereum/EIPs/blob/master/EIPS/eip-55.md
-        const auto address = HexStr(id);
+        // Produce ERC55 checksum address: https://github.com/ethereum/EIPs/blob/master/EIPS/eip-55.md
+        const auto address = id.GetHex();
         std::vector<unsigned char> input(address.begin(), address.end());
         std::vector<unsigned char> output;
-        sha3(input, output);
+        sha3_256_safe(input, output);
         const auto hashedAddress = HexStr(output);
         std::string result;
         for (size_t i{}; i < address.size(); ++i) {
@@ -93,6 +93,7 @@ CTxDestination DecodeDestination(const std::string& str, const CChainParams& par
             return CNoDestination();
         }
         data = ParseHex(hex);
+        std::reverse(data.begin(), data.end());
         return WitnessV16EthHash(uint160(data));
     }
     if (DecodeBase58Check(str, data)) {
@@ -154,7 +155,10 @@ CKey DecodeSecret(const std::string& str)
 {
     CKey key;
     std::vector<unsigned char> data;
-    if (DecodeBase58Check(str, data)) {
+    if (IsHex(str)) {
+        const auto vch = ParseHex(str);
+        key.Set(vch.begin(), vch.end(), false);
+    } else if (DecodeBase58Check(str, data)) {
         const std::vector<unsigned char>& privkey_prefix = Params().Base58Prefix(CChainParams::SECRET_KEY);
         if ((data.size() == 32 + privkey_prefix.size() || (data.size() == 33 + privkey_prefix.size() && data.back() == 1)) &&
             std::equal(privkey_prefix.begin(), privkey_prefix.end(), data.begin())) {
@@ -246,12 +250,4 @@ bool IsValidDestinationString(const std::string& str, const CChainParams& params
 bool IsValidDestinationString(const std::string& str)
 {
     return IsValidDestinationString(str, Params());
-}
-
-CKeyID getCKeyIDFromDestination(const CTxDestination& dest) {
-  switch (dest.index()) {
-    case PKHashType       : return CKeyID(std::get<PKHash>(dest));
-    case WitV0KeyHashType : return CKeyID(std::get<WitnessV0KeyHash>(dest));
-    default               : return {};
-  }
 }

@@ -12,6 +12,7 @@
 #include <script/standard.h>
 #include <uint256.h>
 #include <logging.h>
+
 typedef std::vector<unsigned char> valtype;
 
 MutableTransactionSignatureCreator::MutableTransactionSignatureCreator(const CMutableTransaction* txToIn, unsigned int nInIn, const CAmount& amountIn, int nHashTypeIn) : txTo(txToIn), nIn(nInIn), nHashType(nHashTypeIn), amount(amountIn), checker(txTo, nIn, amountIn) {}
@@ -24,9 +25,6 @@ bool MutableTransactionSignatureCreator::CreateSig(const SigningProvider& provid
 
     // Signing with uncompressed keys is disabled in witness scripts
     if (sigversion == SigVersion::WITNESS_V0 && !key.IsCompressed())
-        return false;
-    // Signing with compressed keys is disabled in eth scripts
-    if (sigversion == SigVersion::WITNESS_V16 && key.IsCompressed())
         return false;
     uint256 hash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, sigversion);
     if (!key.Sign(hash, vchSig))
@@ -119,7 +117,14 @@ static bool SignStep(const SigningProvider& provider, const BaseSignatureCreator
         ret.push_back(std::move(sig));
         return true;
     case TX_PUBKEYHASH: {
-        CKeyID keyID = CKeyID(uint160(vSolutions[0]));
+        CKeyID keyID;
+        if (sigversion == SigVersion::WITNESS_V16) {
+            keyID = CKeyID(uint160(vSolutions[0]), KeyAddressType::UNCOMPRESSED);
+        } else if (sigversion == SigVersion::WITNESS_V0) {
+            keyID = CKeyID(uint160(vSolutions[0]), KeyAddressType::COMPRESSED);
+        } else {
+            keyID = CKeyID(uint160(vSolutions[0]));
+        }
         CPubKey pubkey;
         if (!GetPubKey(provider, sigdata, keyID, pubkey)) {
             // Pubkey could not be found, add to missing
@@ -212,7 +217,6 @@ bool ProduceSignature(const SigningProvider& provider, const BaseSignatureCreato
         solved = solved && SignStep(provider, creator, subscript, result, whichType, SigVersion::BASE, sigdata) && whichType != TX_SCRIPTHASH;
         P2SH = true;
     }
-
     if (solved && whichType == TX_WITNESS_V0_KEYHASH)
     {
         CScript witnessscript;
@@ -226,7 +230,7 @@ bool ProduceSignature(const SigningProvider& provider, const BaseSignatureCreato
     else if (solved && whichType == TX_WITNESS_V16_ETHHASH)
     {
         CScript witnessscript;
-        witnessscript << OP_DUP << OP_SHA3 << ToByteVector(result[0]) << OP_EQUALVERIFY << OP_CHECKSIG;
+        witnessscript << OP_DUP << OP_KECCAK << ToByteVector(result[0]) << OP_EQUALVERIFY << OP_CHECKSIG;
         txnouttype subType;
         solved = solved && SignStep(provider, creator, witnessscript, result, subType, SigVersion::WITNESS_V16, sigdata);
         sigdata.scriptWitness.stack = result;

@@ -1,79 +1,78 @@
-use crate::receipt::Receipt;
-use ethereum::BlockAny;
-use ethereum::TransactionV2;
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+use ain_cpp_imports::Attributes;
+use ethereum::{BlockAny, TransactionV2};
+use ethereum_types::{H160, U256};
 use keccak_hash::H256;
 use log::debug;
-use primitive_types::{H160, U256};
-use std::collections::HashMap;
-use std::fs::File;
 
-use crate::log::LogIndex;
-use std::fmt;
-use std::io;
-use std::io::Write;
-use std::path::Path;
-use std::path::PathBuf;
+use crate::{log::LogIndex, receipt::Receipt, Result};
 
 pub trait BlockStorage {
-    fn get_block_by_number(&self, number: &U256) -> Option<BlockAny>;
-    fn get_block_by_hash(&self, block_hash: &H256) -> Option<BlockAny>;
-    fn put_block(&self, block: &BlockAny);
-    fn get_latest_block(&self) -> Option<BlockAny>;
-    fn put_latest_block(&self, block: Option<&BlockAny>);
-
-    fn get_base_fee(&self, block_hash: &H256) -> Option<U256>;
-    fn set_base_fee(&self, block_hash: H256, base_fee: U256);
+    fn get_block_by_number(&self, number: &U256) -> Result<Option<BlockAny>>;
+    fn get_block_by_hash(&self, block_hash: &H256) -> Result<Option<BlockAny>>;
+    fn put_block(&self, block: &BlockAny) -> Result<()>;
+    fn get_latest_block(&self) -> Result<Option<BlockAny>>;
+    fn put_latest_block(&self, block: Option<&BlockAny>) -> Result<()>;
 }
 
 pub trait TransactionStorage {
-    fn extend_transactions_from_block(&self, block: &BlockAny);
-    fn get_transaction_by_hash(&self, hash: &H256) -> Option<TransactionV2>;
+    fn extend_transactions_from_block(&self, block: &BlockAny) -> Result<()>;
+    fn get_transaction_by_hash(&self, hash: &H256) -> Result<Option<TransactionV2>>;
     fn get_transaction_by_block_hash_and_index(
         &self,
         hash: &H256,
         index: usize,
-    ) -> Option<TransactionV2>;
+    ) -> Result<Option<TransactionV2>>;
     fn get_transaction_by_block_number_and_index(
         &self,
         number: &U256,
         index: usize,
-    ) -> Option<TransactionV2>;
-    fn put_transaction(&self, transaction: &TransactionV2);
+    ) -> Result<Option<TransactionV2>>;
+    fn put_transaction(&self, transaction: &TransactionV2) -> Result<()>;
 }
 
 pub trait ReceiptStorage {
-    fn get_receipt(&self, tx: &H256) -> Option<Receipt>;
-    fn put_receipts(&self, receipts: Vec<Receipt>);
+    fn get_receipt(&self, tx: &H256) -> Result<Option<Receipt>>;
+    fn put_receipts(&self, receipts: Vec<Receipt>) -> Result<()>;
 }
 
 pub trait LogStorage {
-    fn get_logs(&self, block_number: &U256) -> Option<HashMap<H160, Vec<LogIndex>>>;
-    fn put_logs(&self, address: H160, logs: Vec<LogIndex>, block_number: U256);
+    fn get_logs(&self, block_number: &U256) -> Result<Option<HashMap<H160, Vec<LogIndex>>>>;
+    fn put_logs(&self, address: H160, logs: Vec<LogIndex>, block_number: U256) -> Result<()>;
 }
 
 pub trait FlushableStorage {
-    fn flush(&self) -> Result<(), PersistentStateError>;
+    fn flush(&self) -> Result<()>;
 }
 
 pub trait Rollback {
-    fn disconnect_latest_block(&self);
+    fn disconnect_latest_block(&self) -> Result<()>;
+}
+
+pub trait AttributesStorage {
+    fn put_attributes(&self, attributes: Option<&Attributes>) -> Result<()>;
+    fn get_attributes(&self) -> Result<Option<Attributes>>;
 }
 
 pub trait PersistentState {
-    fn save_to_disk(&self, file_path: &str) -> Result<(), PersistentStateError>
+    fn save_to_disk(&self, file_path: &str) -> Result<()>
     where
         Self: serde::ser::Serialize,
     {
         // Automatically resolves from datadir for now
-        let path = match ain_cpp_imports::get_datadir() {
-            Ok(path) => {
-                let path = PathBuf::from(path).join("evm");
-                if !path.exists() {
-                    std::fs::create_dir(&path).expect("Error creating `evm` dir");
-                }
-                path.join(file_path)
+        let datadir = ain_cpp_imports::get_datadir();
+        let path = {
+            let path = PathBuf::from(datadir).join("evm");
+            if !path.exists() {
+                std::fs::create_dir(&path).expect("Error creating `evm` dir");
             }
-            _ => PathBuf::from(file_path),
+            path.join(file_path)
         };
 
         let serialized_state = bincode::serialize(self)?;
@@ -82,17 +81,15 @@ pub trait PersistentState {
         Ok(())
     }
 
-    fn load_from_disk(file_path: &str) -> Result<Self, PersistentStateError>
+    fn load_from_disk(file_path: &str) -> Result<Self>
     where
         Self: Sized + serde::de::DeserializeOwned + Default,
     {
         debug!("Restoring {} from disk", file_path);
 
         // Automatically resolves from datadir for now
-        let path = match ain_cpp_imports::get_datadir() {
-            Ok(path) => PathBuf::from(path).join("evm").join(file_path),
-            _ => PathBuf::from(file_path),
-        };
+        let datadir = ain_cpp_imports::get_datadir();
+        let path = PathBuf::from(datadir).join("evm").join(file_path);
 
         if Path::new(&path).exists() {
             let file = File::open(path)?;
@@ -101,34 +98,5 @@ pub trait PersistentState {
         } else {
             Ok(Self::default())
         }
-    }
-}
-
-#[derive(Debug)]
-pub enum PersistentStateError {
-    IoError(io::Error),
-    BincodeError(bincode::Error),
-}
-
-impl fmt::Display for PersistentStateError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            PersistentStateError::IoError(err) => write!(f, "IO error: {err}"),
-            PersistentStateError::BincodeError(err) => write!(f, "Bincode error: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for PersistentStateError {}
-
-impl From<io::Error> for PersistentStateError {
-    fn from(error: io::Error) -> Self {
-        PersistentStateError::IoError(error)
-    }
-}
-
-impl From<bincode::Error> for PersistentStateError {
-    fn from(error: bincode::Error) -> Self {
-        PersistentStateError::BincodeError(error)
     }
 }

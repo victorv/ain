@@ -7,7 +7,7 @@
 #include <base58.h>
 #include <chainparams.h>
 #include <core_io.h>
-#include <masternodes/anchors.h>
+#include <dfi/anchors.h>
 #include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <sync.h>
@@ -56,7 +56,7 @@ namespace spv
 
 std::unique_ptr<CSpvWrapper> pspv;
 
-// Prefixes to the masternodes database (masternodes/)
+// Prefixes to the masternodes database (dfi/)
 static const char DB_SPVBLOCKS = 'B';     // spv "blocks" table
 static const char DB_SPVTXS    = 'T';     // spv "tx2msg" table
 static const char DB_VERSION   = 'V';
@@ -703,7 +703,7 @@ UniValue CSpvWrapper::SendBitcoins(CWallet* const pwallet, std::string address, 
 
         }
 
-        auto keyid = GetKeyForDestination(*pwallet, dest);
+        auto keyid = GetKeyOrDefaultFromDestination(*pwallet, dest);
         if (keyid.IsNull()) {
             BRTransactionFree(tx);
             throw JSONRPCError(RPC_WALLET_ERROR, "Failed to get address hash.");
@@ -1598,7 +1598,7 @@ UniValue CFakeSpvWrapper::SendBitcoins(CWallet* const pwallet, std::string addre
     }
 
     CTxDestination dest = GetDestinationForKey(new_key, OutputType::BECH32);
-    CKeyID keyid = GetKeyForDestination(*pwallet, dest);
+    CKeyID keyid = GetKeyOrDefaultFromDestination(*pwallet, dest);
     if (keyid.IsNull()) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Failed to get address hash.");
     }
@@ -1625,9 +1625,9 @@ UniValue CFakeSpvWrapper::SendBitcoins(CWallet* const pwallet, std::string addre
     BRTransactionAddOutput(tx, SATOSHIS, o.script, o.scriptLen);
 
     // Add Bech32 input
-    TBytes script(2 + sizeof(keyid), OP_0);
+    TBytes script(2 + 20, OP_0);
     script[1] = 0x14;
-    memcpy(script.data() + 2, keyid.begin(), sizeof(keyid));
+    memcpy(script.data() + 2, keyid.begin(), 20);
     BRTransactionAddInput(tx, toUInt256("1111111111111111111111111111111111111111111111111111111111111111"), 0,
                           SATOSHIS + 1000, script.data(), script.size(), nullptr, 0, nullptr, 0, TXIN_SEQUENCE);
 

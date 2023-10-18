@@ -1,0 +1,24 @@
+[package]
+name = "ain-contracts"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ethereum-types.workspace = true
+anyhow.workspace = true
+ethereum.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+sha3.workspace = true
+sp-core.workspace = true
+lazy_static.workspace = true
+ethabi.workspace = true
+
+[build-dependencies]
+ethers.workspace = true
+ethers-solc.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+

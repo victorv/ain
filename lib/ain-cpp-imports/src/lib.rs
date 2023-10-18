@@ -9,6 +9,24 @@ use bridge::ffi;
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod ffi {
+    pub struct Attributes {
+        pub block_gas_target: u64,
+        pub block_gas_limit: u64,
+        pub finality_count: u64,
+    }
+
+    pub struct DST20Token {
+        pub id: u64,
+        pub name: String,
+        pub symbol: String,
+    }
+
+    pub struct TransactionData {
+        pub tx_type: u8,
+        pub data: String,
+        pub direction: u8,
+    }
+
     const UNIMPL_MSG: &str = "This cannot be used on a test path";
     pub fn getChainId() -> u64 {
         unimplemented!("{}", UNIMPL_MSG)
@@ -25,6 +43,9 @@ mod ffi {
     pub fn getDatadir() -> String {
         unimplemented!("{}", UNIMPL_MSG)
     }
+    pub fn getEthMaxConnections() -> u32 {
+        unimplemented!("{}", UNIMPL_MSG)
+    }
     pub fn getNetwork() -> String {
         unimplemented!("{}", UNIMPL_MSG)
     }
@@ -34,7 +55,7 @@ mod ffi {
     pub fn getChainWork(_block_hash: [u8; 32]) -> [u8; 32] {
         unimplemented!("{}", UNIMPL_MSG)
     }
-    pub fn getPoolTransactions() -> Vec<String> {
+    pub fn getPoolTransactions() -> Vec<TransactionData> {
         unimplemented!("{}", UNIMPL_MSG)
     }
     pub fn getNativeTxSize(_data: Vec<u8>) -> u64 {
@@ -43,7 +64,7 @@ mod ffi {
     pub fn getMinRelayTxFee() -> u64 {
         unimplemented!("{}", UNIMPL_MSG)
     }
-    pub fn getEthPrivKey(_key_id: [u8; 20]) -> [u8; 32] {
+    pub fn getEthPrivKey(_key: String) -> [u8; 32] {
         unimplemented!("{}", UNIMPL_MSG)
     }
     pub fn getStateInputJSON() -> String {
@@ -55,20 +76,41 @@ mod ffi {
     pub fn getCurrentHeight() -> i32 {
         unimplemented!("{}", UNIMPL_MSG)
     }
-    pub fn pastChangiIntermediateHeight2() -> bool {
+    pub fn getAttributeDefaults() -> Attributes {
         unimplemented!("{}", UNIMPL_MSG)
     }
-    pub fn pastChangiIntermediateHeight3() -> bool {
+
+    pub fn CppLogPrintf(_message: String) {
+        // Intentionally left empty, so it can be used from everywhere.
+        // Just the logs are skipped.
+    }
+
+    pub fn getDST20Tokens(_mnview_ptr: usize) -> Vec<DST20Token> {
         unimplemented!("{}", UNIMPL_MSG)
     }
-    pub fn pastChangiIntermediateHeight4() -> bool {
+    pub fn getClientVersion() -> String {
+        unimplemented!("{}", UNIMPL_MSG)
+    }
+    pub fn getNumCores() -> i32 {
+        unimplemented!("{}", UNIMPL_MSG)
+    }
+    pub fn getCORSAllowedOrigin() -> String {
+        unimplemented!("{}", UNIMPL_MSG)
+    }
+    pub fn getNumConnections() -> i32 {
         unimplemented!("{}", UNIMPL_MSG)
     }
 }
 
+pub use ffi::Attributes;
+
 pub fn get_chain_id() -> Result<u64, Box<dyn Error>> {
     let chain_id = ffi::getChainId();
     Ok(chain_id)
+}
+
+pub fn get_client_version() -> String {
+    ffi::getClientVersion()
 }
 
 pub fn is_mining() -> Result<bool, Box<dyn Error>> {
@@ -86,9 +128,12 @@ pub fn get_accounts() -> Result<Vec<String>, Box<dyn Error>> {
     Ok(accounts)
 }
 
-pub fn get_datadir() -> Result<String, Box<dyn Error>> {
-    let datadir = ffi::getDatadir();
-    Ok(datadir)
+pub fn get_datadir() -> String {
+    ffi::getDatadir()
+}
+
+pub fn get_max_connections() -> u32 {
+    ffi::getEthMaxConnections()
 }
 
 pub fn get_network() -> String {
@@ -105,7 +150,7 @@ pub fn get_chainwork(block_hash: [u8; 32]) -> Result<[u8; 32], Box<dyn Error>> {
     Ok(chainwork)
 }
 
-pub fn get_pool_transactions() -> Result<Vec<String>, Box<dyn Error>> {
+pub fn get_pool_transactions() -> Result<Vec<ffi::TransactionData>, Box<dyn Error>> {
     let transactions = ffi::getPoolTransactions();
     Ok(transactions)
 }
@@ -120,8 +165,8 @@ pub fn get_min_relay_tx_fee() -> Result<u64, Box<dyn Error>> {
     Ok(tx_fee)
 }
 
-pub fn get_eth_priv_key(key_id: [u8; 20]) -> Result<[u8; 32], Box<dyn Error>> {
-    let eth_key = ffi::getEthPrivKey(key_id);
+pub fn get_eth_priv_key(key: String) -> Result<[u8; 32], Box<dyn Error>> {
+    let eth_key = ffi::getEthPrivKey(key);
     Ok(eth_key)
 }
 
@@ -134,22 +179,36 @@ pub fn get_state_input_json() -> Option<String> {
     }
 }
 
+/// Returns current DVM block height and highest DVM block header seen
 pub fn get_sync_status() -> Result<(i32, i32), Box<dyn Error>> {
     let current_block = ffi::getCurrentHeight();
     let highest_block = ffi::getHighestBlock();
     Ok((current_block, highest_block))
 }
 
-pub fn past_changi_intermediate_height_2_height() -> bool {
-    ffi::pastChangiIntermediateHeight2()
+pub fn get_attribute_defaults() -> ffi::Attributes {
+    ffi::getAttributeDefaults()
 }
 
-pub fn past_changi_intermediate_height_3_height() -> bool {
-    ffi::pastChangiIntermediateHeight3()
+pub fn log_print(message: &str) {
+    // TODO: Switch to u8 to avoid intermediate string conversions
+    ffi::CppLogPrintf(message.to_owned());
 }
 
-pub fn past_changi_intermediate_height_4_height() -> bool {
-    ffi::pastChangiIntermediateHeight4()
+pub fn get_dst20_tokens(mnview_ptr: usize) -> Vec<ffi::DST20Token> {
+    ffi::getDST20Tokens(mnview_ptr)
+}
+
+pub fn get_num_cores() -> i32 {
+    ffi::getNumCores()
+}
+
+pub fn get_cors_allowed_origin() -> String {
+    ffi::getCORSAllowedOrigin()
+}
+
+pub fn get_num_connections() -> i32 {
+    ffi::getNumConnections()
 }
 
 #[cfg(test)]

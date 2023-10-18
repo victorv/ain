@@ -3,8 +3,8 @@
 // file LICENSE or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chainparams.h>
-#include <masternodes/masternodes.h>
-#include <masternodes/mn_checks.h>
+#include <dfi/masternodes.h>
+#include <dfi/mn_checks.h>
 #include <test/setup_common.h>
 #include <validation.h>
 
@@ -82,7 +82,7 @@ CScript CreateMetaA2A(CAccountToAccountMessage const & msg) {
 BOOST_AUTO_TEST_CASE(apply_a2a_neg)
 {
     Consensus::Params amkCheated = Params().GetConsensus();
-    amkCheated.AMKHeight = 0;
+    amkCheated.DF1AMKHeight = 0;
 
 
     CCustomCSView mnview(*pcustomcsview);
@@ -108,6 +108,8 @@ BOOST_AUTO_TEST_CASE(apply_a2a_neg)
     rawTx.vout = { CTxOut(0, CScript()) };
     rawTx.vin = { CTxIn(auth_out) };
 
+    std::shared_ptr<CScopedTemplateID> evmTemplateId{};
+
     // try to send "A:-1@DFI"
     {
         msg.to = {
@@ -116,8 +118,7 @@ BOOST_AUTO_TEST_CASE(apply_a2a_neg)
 
         rawTx.vout[0].scriptPubKey = CreateMetaA2A(msg);
 
-        uint64_t gasUsed{};
-        res = ApplyCustomTx(mnview, coinview, CTransaction(rawTx), amkCheated, 1, gasUsed);
+        res = ApplyCustomTx(mnview, coinview, CTransaction(rawTx), amkCheated, 1, 0, nullptr, 0, evmTemplateId, false, false);
         BOOST_CHECK(!res.ok);
         BOOST_CHECK_NE(res.msg.find("negative amount"), std::string::npos);
         // check that nothing changes:
@@ -133,8 +134,7 @@ BOOST_AUTO_TEST_CASE(apply_a2a_neg)
 
         rawTx.vout[0].scriptPubKey = CreateMetaA2A(msg);
 
-        uint64_t gasUsed{};
-        res = ApplyCustomTx(mnview, coinview, CTransaction(rawTx), amkCheated, 1, gasUsed);
+        res = ApplyCustomTx(mnview, coinview, CTransaction(rawTx), amkCheated, 1, 0, nullptr, 0, evmTemplateId, false, false);
         BOOST_CHECK(!res.ok);
         BOOST_CHECK_EQUAL(res.code, (uint32_t) CustomTxErrCodes::NotEnoughBalance);
         // check that nothing changes:
@@ -151,8 +151,7 @@ BOOST_AUTO_TEST_CASE(apply_a2a_neg)
 
         rawTx.vout[0].scriptPubKey = CreateMetaA2A(msg);
 
-        uint64_t gasUsed{};
-        res = ApplyCustomTx(mnview, coinview, CTransaction(rawTx), amkCheated, 1, gasUsed);
+        res = ApplyCustomTx(mnview, coinview, CTransaction(rawTx), amkCheated, 1, 0, nullptr, 0, evmTemplateId, false, false);
         BOOST_CHECK(!res.ok);
         BOOST_CHECK_NE(res.msg.find("negative amount"), std::string::npos);
         // check that nothing changes:
@@ -169,8 +168,7 @@ BOOST_AUTO_TEST_CASE(apply_a2a_neg)
 
         rawTx.vout[0].scriptPubKey = CreateMetaA2A(msg);
 
-        uint64_t gasUsed{};
-        res = ApplyCustomTx(mnview, coinview, CTransaction(rawTx), amkCheated, 1, gasUsed);
+        res = ApplyCustomTx(mnview, coinview, CTransaction(rawTx), amkCheated, 1, 0, nullptr, 0, evmTemplateId, false, false);
         BOOST_CHECK(res.ok);
         // check result balances:
         auto const dfi90 = CTokenAmount{DFI, 90};

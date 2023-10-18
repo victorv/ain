@@ -10,7 +10,7 @@
 #include <consensus/params.h>
 #include <consensus/validation.h>
 #include <core_io.h>
-#include <masternodes/masternodes.h>
+#include <dfi/masternodes.h>
 #include <miner.h>
 #include <net.h>
 #include <policy/fees.h>
@@ -174,7 +174,6 @@ static UniValue generatetoaddress(const JSONRPCRequest& request)
             "\nGenerate 11 blocks to myaddress\n"
             + HelpExampleCli("generatetoaddress", "11 \"myaddress\"")
             + "If you are running the DeFi Blockchain wallet, you can get a new address to send the newly generated DFI to with:\n"
-            + HelpExampleCli("getnewaddress", "")
                 },
             }.Check(request);
 
@@ -189,8 +188,7 @@ static UniValue generatetoaddress(const JSONRPCRequest& request)
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid address");
     }
 
-    CKeyID passedID = getCKeyIDFromDestination(destination);
-
+    CKeyID passedID = CKeyID::FromOrDefaultDestination(destination, KeyType::MNOperatorKeyType);
     auto myAllMNs = pcustomcsview->GetOperatorsMulti();
     if (myAllMNs.empty()) {
       throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: I am not masternode operator");
@@ -305,7 +303,7 @@ static UniValue getmininginfo(const JSONRPCRequest& request)
             // Get block times
             const auto subNodesBlockTime = pcustomcsview->GetBlockTimes(nodePtr->operatorAuthAddress, height, nodePtr->creationHeight, *timelock);
 
-            if (height >= Params().GetConsensus().EunosPayaHeight) {
+            if (height >= Params().GetConsensus().DF10EunosPayaHeight) {
                 const uint8_t loops = *timelock == CMasternode::TENYEAR ? 4 : *timelock == CMasternode::FIVEYEAR ? 3 : 2;
                 UniValue multipliers(UniValue::VARR);
                 for (uint8_t i{0}; i < loops; ++i) {
@@ -649,9 +647,11 @@ static UniValue getblocktemplate(const JSONRPCRequest& request)
 
         // Create new block
         CScript scriptDummy = CScript() << OP_TRUE;
-        pblocktemplate = BlockAssembler(Params()).CreateNewBlock(scriptDummy);
-        if (!pblocktemplate)
-            throw JSONRPCError(RPC_OUT_OF_MEMORY, "Out of memory");
+        auto res = BlockAssembler(Params()).CreateNewBlock(scriptDummy);
+        if (!res)
+            throw JSONRPCError(RPC_MISC_ERROR, res.msg);
+
+        pblocktemplate = std::move(*res);
 
         // Need to update only after we know CreateNewBlock succeeded
         pindexPrev = pindexPrevNew;

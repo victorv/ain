@@ -2,12 +2,13 @@ name: Tests - DeFiCh/metachain-ts-suite
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - master
   pull_request:
     branches:
       - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   build:
@@ -24,8 +25,10 @@ jobs:
     - name: Setup dependencies for target
       run: ./make.sh ci-setup-deps-target
 
-    - name: Install dependencies for test
-      run: ./make.sh ci-setup-deps-test
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: lib -> ../build/lib/target
+        save-if: ${{ github.ref == 'refs/heads/master' }}
 
     - name: Build binaries
       run: ./make.sh build
@@ -33,7 +36,7 @@ jobs:
     - name: Upload binaries
       uses: actions/upload-artifact@v3
       with:
-        name: defibins
+        name: defi-bins
         path: |
           build/src/defid
 
@@ -52,7 +55,7 @@ jobs:
       - name: Download binaries
         uses: actions/download-artifact@v3
         with:
-          name: defibins
+          name: defi-bins
 
       - name: Setup permissions
         run: |

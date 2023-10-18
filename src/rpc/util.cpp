@@ -150,13 +150,16 @@ CPubKey AddrToPubKey(FillableSigningProvider* const keystore, const std::string&
     if (!IsValidDestination(dest)) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address: " + addr_in);
     }
-    CKeyID key = GetKeyForDestination(*keystore, dest);
+    CKeyID key = GetKeyOrDefaultFromDestination(*keystore, dest);
     if (key.IsNull()) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("%s does not refer to a key", addr_in));
     }
     CPubKey vchPubKey;
     if (!keystore->GetPubKey(key, vchPubKey)) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("no full public key for address %s", addr_in));
+    }
+    if (dest.index() == WitV16KeyEthHashType && vchPubKey.IsCompressed()) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("no valid public key for address %s", addr_in));
     }
     if (!vchPubKey.IsFullyValid()) {
        throw JSONRPCError(RPC_INTERNAL_ERROR, "Wallet contains an invalid public key");

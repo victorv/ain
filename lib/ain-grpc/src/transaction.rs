@@ -1,10 +1,9 @@
 use ain_evm::transaction::{SignedTx, TransactionError};
-use ethereum::EnvelopedEncodable;
-use ethereum::{BlockAny, TransactionV2};
-use primitive_types::{H256, U256};
+use ethereum::{AccessListItem, BlockAny, EnvelopedEncodable, TransactionV2};
+use ethereum_types::{H256, U256};
 
 use crate::{
-    codegen::types::EthTransactionInfo,
+    codegen::types::{EthAccessList, EthTransactionInfo},
     utils::{format_address, format_h256, format_u256},
 };
 
@@ -16,8 +15,24 @@ impl From<SignedTx> for EthTransactionInfo {
             format!("0x{}", hex::encode(signed_tx.data()))
         };
 
+        let access_list: Vec<EthAccessList> = match &signed_tx.transaction {
+            TransactionV2::Legacy(_) => Vec::new(),
+            TransactionV2::EIP2930(tx) => tx
+                .access_list
+                .clone()
+                .into_iter()
+                .map(std::convert::Into::into)
+                .collect(),
+            TransactionV2::EIP1559(tx) => tx
+                .access_list
+                .clone()
+                .into_iter()
+                .map(std::convert::Into::into)
+                .collect(),
+        };
+
         EthTransactionInfo {
-            hash: format_h256(signed_tx.transaction.hash()),
+            hash: format_h256(signed_tx.hash()),
             from: format_address(signed_tx.sender),
             to: signed_tx.to().map(format_address),
             gas: format_u256(signed_tx.gas_limit()),
@@ -31,7 +46,9 @@ impl From<SignedTx> for EthTransactionInfo {
             block_hash: None,
             block_number: None,
             transaction_index: None,
-            field_type: signed_tx.transaction.type_id().unwrap_or_default() as u32,
+            field_type: format_u256(U256::from(
+                signed_tx.transaction.type_id().unwrap_or_default(),
+            )),
             max_fee_per_gas: signed_tx
                 .max_fee_per_gas()
                 .map(format_u256)
@@ -40,6 +57,21 @@ impl From<SignedTx> for EthTransactionInfo {
                 .max_priority_fee_per_gas()
                 .map(format_u256)
                 .unwrap_or_default(),
+            access_list,
+            chain_id: format!("{:#x}", signed_tx.chain_id()),
+        }
+    }
+}
+
+impl From<AccessListItem> for EthAccessList {
+    fn from(access_list: AccessListItem) -> Self {
+        Self {
+            address: format_address(access_list.address),
+            storage_keys: access_list
+                .storage_keys
+                .into_iter()
+                .map(format_h256)
+                .collect(),
         }
     }
 }
@@ -74,6 +106,11 @@ impl EthTransactionInfo {
             block_hash: Some(format_h256(block.header.hash())),
             block_number: Some(format_u256(block.header.number)),
             transaction_index: Some(format_u256(U256::from(index))),
+            gas_price: format_u256(
+                signed_tx
+                    .effective_gas_price(block.header.base_fee)
+                    .map_err(|_| TransactionError::ConstructionError)?,
+            ),
             ..EthTransactionInfo::from(signed_tx)
         })
     }

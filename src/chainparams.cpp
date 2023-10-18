@@ -8,7 +8,7 @@
 #include <chainparams.h>
 #include <chainparamsseeds.h>
 #include <consensus/merkle.h>
-#include <masternodes/mn_checks.h>
+#include <dfi/mn_checks.h>
 #include <streams.h>
 #include <tinyformat.h>
 #include <util/system.h>
@@ -39,7 +39,7 @@ std::vector<CTransactionRef> CChainParams::CreateGenesisMasternodes()
         CTxDestination ownerDest = DecodeDestination(addrs.ownerAddress, *this);
         assert(ownerDest.index() == PKHashType || ownerDest.index() == WitV0KeyHashType);
 
-        CKeyID operatorAuthKey = operatorDest.index() == PKHashType ? CKeyID(std::get<PKHash>(operatorDest)) : CKeyID(std::get<WitnessV0KeyHash>(operatorDest)) ;
+        CKeyID operatorAuthKey = CKeyID::FromOrDefaultDestination(operatorDest, KeyType::MNOperatorKeyType);
         genesisTeam.insert(operatorAuthKey);
         CDataStream metadata(DfTxMarker, SER_NETWORK, PROTOCOL_VERSION);
         metadata << static_cast<unsigned char>(CustomTxType::CreateMasternode)
@@ -119,33 +119,28 @@ public:
         consensus.BIP34Hash = uint256();
         consensus.BIP65Height = 0; // 000000000000000004c2b624ed5d7756c508d90fd0da2c7c679febfa6c4735f0
         consensus.BIP66Height = 0; // 00000000000000000379eaa19dce8c9b722d46ae6a57c2f1a988119488b50931
-        consensus.AMKHeight = 356500; // Oct 12th, 2020.
-        consensus.BayfrontHeight = 405000; // Nov 2nd, 2020.
-        consensus.BayfrontMarinaHeight = 465150; // Nov 28th, 2020.
-        consensus.BayfrontGardensHeight = 488300; // Dec 8th, 2020.
-        consensus.ClarkeQuayHeight = 595738; // Jan 24th, 2021.
-        consensus.DakotaHeight = 678000; // Mar 1st, 2021.
-        consensus.DakotaCrescentHeight = 733000; // Mar 25th, 2021.
-        consensus.EunosHeight = 894000; // Jun 3rd, 2021.
-        consensus.EunosKampungHeight = 895743; // Jun 4th, 2021.
-        consensus.EunosPayaHeight = 1072000; // Aug 5th, 2021.
-        consensus.FortCanningHeight = 1367000; // Nov 15th, 2021.
-        consensus.FortCanningMuseumHeight = 1430640; // Dec 7th, 2021.
-        consensus.FortCanningParkHeight = 1503143; // Jan 2nd, 2022.
-        consensus.FortCanningHillHeight = 1604999; // Feb 7th, 2022.
-        consensus.FortCanningRoadHeight = 1786000; // April 11th, 2022.
-        consensus.FortCanningCrunchHeight = 1936000; // June 2nd, 2022.
-        consensus.FortCanningSpringHeight = 2033000; // July 6th, 2022.
-        consensus.FortCanningGreatWorldHeight = 2212000; // Sep 7th, 2022.
-        consensus.FortCanningEpilogueHeight = 2257500; // Sep 22nd, 2022.
-        consensus.GrandCentralHeight = 2479000; // Dec 8th, 2022.
-        consensus.GrandCentralEpilogueHeight = 2574000; // Jan 10th, 2023.
-        consensus.NextNetworkUpgradeHeight = std::numeric_limits<int>::max();
-        consensus.ChangiIntermediateHeight = std::numeric_limits<int>::max();
-        consensus.ChangiIntermediateHeight2 = std::numeric_limits<int>::max();
-        consensus.ChangiIntermediateHeight3 = std::numeric_limits<int>::max();
-        consensus.ChangiIntermediateHeight3 = std::numeric_limits<int>::max();
-        consensus.ChangiIntermediateHeight4 = std::numeric_limits<int>::max();
+        consensus.DF1AMKHeight = 356500; // Oct 12th, 2020.
+        consensus.DF2BayfrontHeight = 405000; // Nov 2nd, 2020.
+        consensus.DF3BayfrontMarinaHeight = 465150; // Nov 28th, 2020.
+        consensus.DF4BayfrontGardensHeight = 488300; // Dec 8th, 2020.
+        consensus.DF5ClarkeQuayHeight = 595738; // Jan 24th, 2021.
+        consensus.DF6DakotaHeight = 678000; // Mar 1st, 2021.
+        consensus.DF7DakotaCrescentHeight = 733000; // Mar 25th, 2021.
+        consensus.DF8EunosHeight = 894000; // Jun 3rd, 2021.
+        consensus.DF9EunosKampungHeight = 895743; // Jun 4th, 2021.
+        consensus.DF10EunosPayaHeight = 1072000; // Aug 5th, 2021.
+        consensus.DF11FortCanningHeight = 1367000; // Nov 15th, 2021.
+        consensus.DF12FortCanningMuseumHeight = 1430640; // Dec 7th, 2021.
+        consensus.DF13FortCanningParkHeight = 1503143; // Jan 2nd, 2022.
+        consensus.DF14FortCanningHillHeight = 1604999; // Feb 7th, 2022.
+        consensus.DF15FortCanningRoadHeight = 1786000; // April 11th, 2022.
+        consensus.DF16FortCanningCrunchHeight = 1936000; // June 2nd, 2022.
+        consensus.DF17FortCanningSpringHeight = 2033000; // July 6th, 2022.
+        consensus.DF18FortCanningGreatWorldHeight = 2212000; // Sep 7th, 2022.
+        consensus.DF19FortCanningEpilogueHeight = 2257500; // Sep 22nd, 2022.
+        consensus.DF20GrandCentralHeight = 2479000; // Dec 8th, 2022.
+        consensus.DF21GrandCentralEpilogueHeight = 2574000; // Jan 10th, 2023.
+        consensus.DF22MetachainHeight = std::numeric_limits<int>::max();
 
         consensus.pos.diffLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 //        consensus.pos.nTargetTimespan = 14 * 24 * 60 * 60; // two weeks
@@ -212,8 +207,8 @@ public:
         consensus.props.emergencyPeriod = 8640;
         consensus.props.feeBurnPct = COIN / 2;
 
-        consensus.nonUtxoBlockSubsidies.emplace(CommunityAccountType::IncentiveFunding, 45 * COIN / 200); // 45 DFI of 200 per block (rate normalized to (COIN == 100%))
-        consensus.nonUtxoBlockSubsidies.emplace(CommunityAccountType::AnchorReward, COIN /10 / 200);       // 0.1 DFI of 200 per block
+        consensus.blockTokenRewardsLegacy.emplace(CommunityAccountType::IncentiveFunding, 45 * COIN / 200); // 45 DFI of 200 per block (rate normalized to (COIN == 100%))
+        consensus.blockTokenRewardsLegacy.emplace(CommunityAccountType::AnchorReward, COIN /10 / 200);       // 0.1 DFI of 200 per block
 
         // New coinbase reward distribution
         consensus.dist.masternode = 3333; // 33.33%
@@ -224,12 +219,12 @@ public:
         consensus.dist.options = 988; // 9.88%
         consensus.dist.unallocated = 173; // 1.73%
 
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::AnchorReward, consensus.dist.anchor);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::IncentiveFunding, consensus.dist.liquidity);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Loan, consensus.dist.loan);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Options, consensus.dist.options);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Unallocated, consensus.dist.unallocated);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::CommunityDevFunds, consensus.dist.community);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::AnchorReward, consensus.dist.anchor);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::IncentiveFunding, consensus.dist.liquidity);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Loan, consensus.dist.loan);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Options, consensus.dist.options);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Unallocated, consensus.dist.unallocated);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::CommunityDevFunds, consensus.dist.community);
 
         // EVM chain id
         consensus.evmChainId = 1130; // ETH main chain ID
@@ -366,6 +361,8 @@ public:
                 {2500000,uint256S("cf1df1124af59b9928fac48947883206dd33d165022086bee9d5001d047395da")},
                 {2600000,uint256S("af065074bb15c3583abcd3e7c22035a026cfd8d3fbc72d890fcd8b435cd8b7b4")},
                 {2700000,uint256S("3cf74bcaea19d457c7d8e7896177035e3e446f41ee2ac72dbfb25ac2072f49c5")},
+                {3310000,uint256S("87584e474d74a5bdea797ef684ab8c1347bed6baad26a9d1a0e00032c8d68bfa")},
+
             }
         };
 
@@ -399,30 +396,28 @@ public:
         consensus.BIP34Hash = uint256();
         consensus.BIP65Height = 0; // 00000000007f6655f22f98e72ed80d8b06dc761d5da09df0fa1dc4be4f861eb6
         consensus.BIP66Height = 0; // 000000002104c8c45e99a8853285a3b592602a3ccde2b832481da85e9e4ba182
-        consensus.AMKHeight = 150;
-        consensus.BayfrontHeight = 3000;
-        consensus.BayfrontMarinaHeight = 90470;
-        consensus.BayfrontGardensHeight = 101342;
-        consensus.ClarkeQuayHeight = 155000;
-        consensus.DakotaHeight = 220680;
-        consensus.DakotaCrescentHeight = 287700;
-        consensus.EunosHeight = 354950;
-        consensus.EunosKampungHeight = consensus.EunosHeight;
-        consensus.EunosPayaHeight = 463300;
-        consensus.FortCanningHeight = 686200;
-        consensus.FortCanningMuseumHeight = 724000;
-        consensus.FortCanningParkHeight = 828800;
-        consensus.FortCanningHillHeight = 828900;
-        consensus.FortCanningRoadHeight = 893700;
-        consensus.FortCanningCrunchHeight = 1011600;
-        consensus.FortCanningSpringHeight = 1086000;
-        consensus.FortCanningGreatWorldHeight = 1223000;
-        consensus.FortCanningEpilogueHeight = 1244000;
-        consensus.GrandCentralHeight = 1366000;
-        consensus.GrandCentralEpilogueHeight = 1438200;
-        consensus.NextNetworkUpgradeHeight = std::numeric_limits<int>::max();
-        consensus.ChangiIntermediateHeight = std::numeric_limits<int>::max();
-        consensus.ChangiIntermediateHeight2 = std::numeric_limits<int>::max();
+        consensus.DF1AMKHeight = 150;
+        consensus.DF2BayfrontHeight = 3000;
+        consensus.DF3BayfrontMarinaHeight = 90470;
+        consensus.DF4BayfrontGardensHeight = 101342;
+        consensus.DF5ClarkeQuayHeight = 155000;
+        consensus.DF6DakotaHeight = 220680;
+        consensus.DF7DakotaCrescentHeight = 287700;
+        consensus.DF8EunosHeight = 354950;
+        consensus.DF9EunosKampungHeight = consensus.DF8EunosHeight;
+        consensus.DF10EunosPayaHeight = 463300;
+        consensus.DF11FortCanningHeight = 686200;
+        consensus.DF12FortCanningMuseumHeight = 724000;
+        consensus.DF13FortCanningParkHeight = 828800;
+        consensus.DF14FortCanningHillHeight = 828900;
+        consensus.DF15FortCanningRoadHeight = 893700;
+        consensus.DF16FortCanningCrunchHeight = 1011600;
+        consensus.DF17FortCanningSpringHeight = 1086000;
+        consensus.DF18FortCanningGreatWorldHeight = 1150000;
+        consensus.DF19FortCanningEpilogueHeight = 1150010;
+        consensus.DF20GrandCentralHeight = 1150020;
+        consensus.DF21GrandCentralEpilogueHeight = 1150030;
+        consensus.DF22MetachainHeight = 1150040;
 
         consensus.pos.diffLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 //        consensus.pos.nTargetTimespan = 14 * 24 * 60 * 60; // two weeks
@@ -490,8 +485,8 @@ public:
         consensus.props.feeBurnPct = COIN / 2;
 
 
-        consensus.nonUtxoBlockSubsidies.emplace(CommunityAccountType::IncentiveFunding, 45 * COIN / 200); // 45 DFI @ 200 per block (rate normalized to (COIN == 100%))
-        consensus.nonUtxoBlockSubsidies.emplace(CommunityAccountType::AnchorReward, COIN/10 / 200);       // 0.1 DFI @ 200 per block
+        consensus.blockTokenRewardsLegacy.emplace(CommunityAccountType::IncentiveFunding, 45 * COIN / 200); // 45 DFI @ 200 per block (rate normalized to (COIN == 100%))
+        consensus.blockTokenRewardsLegacy.emplace(CommunityAccountType::AnchorReward, COIN/10 / 200);       // 0.1 DFI @ 200 per block
 
         // New coinbase reward distribution
         consensus.dist.masternode = 3333; // 33.33%
@@ -502,12 +497,12 @@ public:
         consensus.dist.options = 988; // 9.88%
         consensus.dist.unallocated = 173; // 1.73%
 
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::AnchorReward, consensus.dist.anchor);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::IncentiveFunding, consensus.dist.liquidity);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Loan, consensus.dist.loan);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Options, consensus.dist.options);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Unallocated, consensus.dist.unallocated);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::CommunityDevFunds, consensus.dist.community);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::AnchorReward, consensus.dist.anchor);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::IncentiveFunding, consensus.dist.liquidity);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Loan, consensus.dist.loan);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Options, consensus.dist.options);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Unallocated, consensus.dist.unallocated);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::CommunityDevFunds, consensus.dist.community);
 
         // EVM chain id
         consensus.evmChainId = 1131; // test chain ID
@@ -574,6 +569,7 @@ public:
         vSeeds.clear();
         // nodes with support for servicebits filtering should be at the top
         vSeeds.emplace_back("testnet-seed.defichain.io");
+	vSeeds.emplace_back("35.195.186.78");
 
         vFixedSeeds = std::vector<SeedSpec6>(pnSeed6_test, pnSeed6_test + ARRAYLEN(pnSeed6_test));
 
@@ -588,8 +584,7 @@ public:
                 {100000, uint256S("9896ac2c34c20771742bccda4f00f458229819947e02204022c8ff26093ac81f")},
                 {150000, uint256S("af9307f438f5c378d1a49cfd3872173a07ed4362d56155e457daffd1061742d4")},
                 {300000, uint256S("205b522772ce34206a08a635c800f99d2fc4e9696ab8c470dad7f5fa51dfea1a")},
-                {1445000, uint256S("6fd0cafbbd2262d5cecd2e07e73fe6703bac364e5d4986da3fe512b0eccf944d")},
-                {1471000, uint256S("dcf4a5fb69c004d0921710e09a09d10f275b3bc696e45ca03f6c322bb32f41bc")},
+                {1100000, uint256S("6fdfc12c273135a992a05f8eb9ec4a0f5db972c3f1d8941d1af336f99cf71f5b")},
             }
         };
 
@@ -619,32 +614,28 @@ public:
         consensus.BIP34Hash = uint256();
         consensus.BIP65Height = 0;
         consensus.BIP66Height = 0;
-        consensus.AMKHeight = 150;
-        consensus.BayfrontHeight = 3000;
-        consensus.BayfrontMarinaHeight = 90470;
-        consensus.BayfrontGardensHeight = 101342;
-        consensus.ClarkeQuayHeight = 155000;
-        consensus.DakotaHeight = 220680;
-        consensus.DakotaCrescentHeight = 287700;
-        consensus.EunosHeight = 354950;
-        consensus.EunosKampungHeight = consensus.EunosHeight;
-        consensus.EunosPayaHeight = 463300;
-        consensus.FortCanningHeight = 686200;
-        consensus.FortCanningMuseumHeight = 724000;
-        consensus.FortCanningParkHeight = 828800;
-        consensus.FortCanningHillHeight = 828900;
-        consensus.FortCanningRoadHeight = 893700;
-        consensus.FortCanningCrunchHeight = 1011600;
-        consensus.FortCanningSpringHeight = 1086000;
-        consensus.FortCanningGreatWorldHeight = 1223000;
-        consensus.FortCanningEpilogueHeight = 1244000;
-        consensus.GrandCentralHeight = 1366000;
-        consensus.GrandCentralEpilogueHeight = 1438200;
-        consensus.NextNetworkUpgradeHeight = 1586750;
-        consensus.ChangiIntermediateHeight = 1717800;
-        consensus.ChangiIntermediateHeight2 = 1717493;
-        consensus.ChangiIntermediateHeight3 = 1730100;
-        consensus.ChangiIntermediateHeight4 = std::numeric_limits<int>::max();
+        consensus.DF1AMKHeight = 150;
+        consensus.DF2BayfrontHeight = 3000;
+        consensus.DF3BayfrontMarinaHeight = 90470;
+        consensus.DF4BayfrontGardensHeight = 101342;
+        consensus.DF5ClarkeQuayHeight = 155000;
+        consensus.DF6DakotaHeight = 220680;
+        consensus.DF7DakotaCrescentHeight = 287700;
+        consensus.DF8EunosHeight = 354950;
+        consensus.DF9EunosKampungHeight = consensus.DF8EunosHeight;
+        consensus.DF10EunosPayaHeight = 463300;
+        consensus.DF11FortCanningHeight = 686200;
+        consensus.DF12FortCanningMuseumHeight = 724000;
+        consensus.DF13FortCanningParkHeight = 828800;
+        consensus.DF14FortCanningHillHeight = 828900;
+        consensus.DF15FortCanningRoadHeight = 893700;
+        consensus.DF16FortCanningCrunchHeight = 1011600;
+        consensus.DF17FortCanningSpringHeight = 1086000;
+        consensus.DF18FortCanningGreatWorldHeight = 1223000;
+        consensus.DF19FortCanningEpilogueHeight = 1244000;
+        consensus.DF20GrandCentralHeight = 1366000;
+        consensus.DF21GrandCentralEpilogueHeight = 1438200;
+        consensus.DF22MetachainHeight = 1586750;
 
         consensus.pos.diffLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         consensus.pos.nTargetTimespan = 5 * 60; // 5 min == 10 blocks
@@ -709,8 +700,8 @@ public:
         consensus.props.emergencyPeriod = 8640;
         consensus.props.feeBurnPct = COIN / 2;
 
-        consensus.nonUtxoBlockSubsidies.emplace(CommunityAccountType::IncentiveFunding, 45 * COIN / 200); // 45 DFI @ 200 per block (rate normalized to (COIN == 100%))
-        consensus.nonUtxoBlockSubsidies.emplace(CommunityAccountType::AnchorReward, COIN/10 / 200);       // 0.1 DFI @ 200 per block
+        consensus.blockTokenRewardsLegacy.emplace(CommunityAccountType::IncentiveFunding, 45 * COIN / 200); // 45 DFI @ 200 per block (rate normalized to (COIN == 100%))
+        consensus.blockTokenRewardsLegacy.emplace(CommunityAccountType::AnchorReward, COIN/10 / 200);       // 0.1 DFI @ 200 per block
 
         // New coinbase reward distribution
         consensus.dist.masternode = 3333; // 33.33%
@@ -721,12 +712,12 @@ public:
         consensus.dist.options = 988; // 9.88%
         consensus.dist.unallocated = 173; // 1.73%
 
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::AnchorReward, consensus.dist.anchor);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::IncentiveFunding, consensus.dist.liquidity);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Loan, consensus.dist.loan);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Options, consensus.dist.options);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Unallocated, consensus.dist.unallocated);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::CommunityDevFunds, consensus.dist.community);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::AnchorReward, consensus.dist.anchor);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::IncentiveFunding, consensus.dist.liquidity);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Loan, consensus.dist.loan);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Options, consensus.dist.options);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Unallocated, consensus.dist.unallocated);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::CommunityDevFunds, consensus.dist.community);
 
         // EVM chain id
         consensus.evmChainId = 1133; // changi chain ID
@@ -839,32 +830,28 @@ public:
         consensus.BIP34Hash = uint256();
         consensus.BIP65Height = 0;
         consensus.BIP66Height = 0;
-        consensus.AMKHeight = 150;
-        consensus.BayfrontHeight = 3000;
-        consensus.BayfrontMarinaHeight = 90470;
-        consensus.BayfrontGardensHeight = 101342;
-        consensus.ClarkeQuayHeight = 155000;
-        consensus.DakotaHeight = 220680;
-        consensus.DakotaCrescentHeight = 287700;
-        consensus.EunosHeight = 354950;
-        consensus.EunosKampungHeight = consensus.EunosHeight;
-        consensus.EunosPayaHeight = 463300;
-        consensus.FortCanningHeight = 686200;
-        consensus.FortCanningMuseumHeight = 724000;
-        consensus.FortCanningParkHeight = 828800;
-        consensus.FortCanningHillHeight = 828900;
-        consensus.FortCanningRoadHeight = 893700;
-        consensus.FortCanningCrunchHeight = 1011600;
-        consensus.FortCanningSpringHeight = 1086000;
-        consensus.FortCanningGreatWorldHeight = 1223000;
-        consensus.FortCanningEpilogueHeight = 1244000;
-        consensus.GrandCentralHeight = 1366000;
-        consensus.GrandCentralEpilogueHeight = 1438200;
-        consensus.NextNetworkUpgradeHeight = 1586750;
-        consensus.ChangiIntermediateHeight = std::numeric_limits<int>::max();
-        consensus.ChangiIntermediateHeight2 = std::numeric_limits<int>::max();
-        consensus.ChangiIntermediateHeight3 = std::numeric_limits<int>::max();
-        consensus.ChangiIntermediateHeight4 = std::numeric_limits<int>::max();
+        consensus.DF1AMKHeight = 150;
+        consensus.DF2BayfrontHeight = 3000;
+        consensus.DF3BayfrontMarinaHeight = 90470;
+        consensus.DF4BayfrontGardensHeight = 101342;
+        consensus.DF5ClarkeQuayHeight = 155000;
+        consensus.DF6DakotaHeight = 220680;
+        consensus.DF7DakotaCrescentHeight = 287700;
+        consensus.DF8EunosHeight = 354950;
+        consensus.DF9EunosKampungHeight = consensus.DF8EunosHeight;
+        consensus.DF10EunosPayaHeight = 463300;
+        consensus.DF11FortCanningHeight = 686200;
+        consensus.DF12FortCanningMuseumHeight = 724000;
+        consensus.DF13FortCanningParkHeight = 828800;
+        consensus.DF14FortCanningHillHeight = 828900;
+        consensus.DF15FortCanningRoadHeight = 893700;
+        consensus.DF16FortCanningCrunchHeight = 1011600;
+        consensus.DF17FortCanningSpringHeight = 1086000;
+        consensus.DF18FortCanningGreatWorldHeight = 1223000;
+        consensus.DF19FortCanningEpilogueHeight = 1244000;
+        consensus.DF20GrandCentralHeight = 1366000;
+        consensus.DF21GrandCentralEpilogueHeight = 1438200;
+        consensus.DF22MetachainHeight = 1586750;
 
         consensus.pos.diffLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         consensus.pos.nTargetTimespan = 5 * 60; // 5 min == 10 blocks
@@ -929,8 +916,8 @@ public:
         consensus.props.emergencyPeriod = 8640;
         consensus.props.feeBurnPct = COIN / 2;
 
-        consensus.nonUtxoBlockSubsidies.emplace(CommunityAccountType::IncentiveFunding, 45 * COIN / 200); // 45 DFI @ 200 per block (rate normalized to (COIN == 100%))
-        consensus.nonUtxoBlockSubsidies.emplace(CommunityAccountType::AnchorReward, COIN/10 / 200);       // 0.1 DFI @ 200 per block
+        consensus.blockTokenRewardsLegacy.emplace(CommunityAccountType::IncentiveFunding, 45 * COIN / 200); // 45 DFI @ 200 per block (rate normalized to (COIN == 100%))
+        consensus.blockTokenRewardsLegacy.emplace(CommunityAccountType::AnchorReward, COIN/10 / 200);       // 0.1 DFI @ 200 per block
 
         // New coinbase reward distribution
         consensus.dist.masternode = 3333; // 33.33%
@@ -941,12 +928,12 @@ public:
         consensus.dist.options = 988; // 9.88%
         consensus.dist.unallocated = 173; // 1.73%
 
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::AnchorReward, consensus.dist.anchor);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::IncentiveFunding, consensus.dist.liquidity);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Loan, consensus.dist.loan);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Options, consensus.dist.options);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Unallocated, consensus.dist.unallocated);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::CommunityDevFunds, consensus.dist.community);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::AnchorReward, consensus.dist.anchor);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::IncentiveFunding, consensus.dist.liquidity);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Loan, consensus.dist.loan);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Options, consensus.dist.options);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Unallocated, consensus.dist.unallocated);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::CommunityDevFunds, consensus.dist.community);
 
         // EVM chain id
         consensus.evmChainId = 1132; // dev chain ID
@@ -1062,32 +1049,28 @@ public:
         consensus.BIP34Hash = uint256();
         consensus.BIP65Height = 1351; // BIP65 activated on regtest (Used in functional tests)
         consensus.BIP66Height = 1251; // BIP66 activated on regtest (Used in functional tests)
-        consensus.AMKHeight = 10000000;
-        consensus.BayfrontHeight = 10000000;
-        consensus.BayfrontMarinaHeight = 10000000;
-        consensus.BayfrontGardensHeight = 10000000;
-        consensus.ClarkeQuayHeight = 10000000;
-        consensus.DakotaHeight = 10000000;
-        consensus.DakotaCrescentHeight = 10000000;
-        consensus.EunosHeight = 10000000;
-        consensus.EunosKampungHeight = 10000000;
-        consensus.EunosPayaHeight = 10000000;
-        consensus.FortCanningHeight = 10000000;
-        consensus.FortCanningMuseumHeight = 10000000;
-        consensus.FortCanningParkHeight = 10000000;
-        consensus.FortCanningHillHeight = 10000000;
-        consensus.FortCanningRoadHeight = 10000000;
-        consensus.FortCanningCrunchHeight = 10000000;
-        consensus.FortCanningSpringHeight = 10000000;
-        consensus.FortCanningGreatWorldHeight = 10000000;
-        consensus.FortCanningEpilogueHeight = 10000000;
-        consensus.GrandCentralHeight = 10000000;
-        consensus.GrandCentralEpilogueHeight = 10000000;
-        consensus.NextNetworkUpgradeHeight = 10000000;
-        consensus.ChangiIntermediateHeight = 10000000;
-        consensus.ChangiIntermediateHeight2 = 10000000;
-        consensus.ChangiIntermediateHeight3 = 10000000;
-        consensus.ChangiIntermediateHeight4 = std::numeric_limits<int>::max();
+        consensus.DF1AMKHeight = 10000000;
+        consensus.DF2BayfrontHeight = 10000000;
+        consensus.DF3BayfrontMarinaHeight = 10000000;
+        consensus.DF4BayfrontGardensHeight = 10000000;
+        consensus.DF5ClarkeQuayHeight = 10000000;
+        consensus.DF6DakotaHeight = 10000000;
+        consensus.DF7DakotaCrescentHeight = 10000000;
+        consensus.DF8EunosHeight = 10000000;
+        consensus.DF9EunosKampungHeight = 10000000;
+        consensus.DF10EunosPayaHeight = 10000000;
+        consensus.DF11FortCanningHeight = 10000000;
+        consensus.DF12FortCanningMuseumHeight = 10000000;
+        consensus.DF13FortCanningParkHeight = 10000000;
+        consensus.DF14FortCanningHillHeight = 10000000;
+        consensus.DF15FortCanningRoadHeight = 10000000;
+        consensus.DF16FortCanningCrunchHeight = 10000000;
+        consensus.DF17FortCanningSpringHeight = 10000000;
+        consensus.DF18FortCanningGreatWorldHeight = 10000000;
+        consensus.DF19FortCanningEpilogueHeight = 10000000;
+        consensus.DF20GrandCentralHeight = 10000000;
+        consensus.DF21GrandCentralEpilogueHeight = 10000000;
+        consensus.DF22MetachainHeight = 10000000;
 
         consensus.pos.diffLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         consensus.pos.nTargetTimespan = 14 * 24 * 60 * 60; // two weeks
@@ -1152,8 +1135,8 @@ public:
 
         consensus.vaultCreationFee = 1 * COIN;
 
-        consensus.nonUtxoBlockSubsidies.emplace(CommunityAccountType::IncentiveFunding, 10 * COIN / 50); // normalized to (COIN == 100%) // 10 per block
-        consensus.nonUtxoBlockSubsidies.emplace(CommunityAccountType::AnchorReward, COIN/10 / 50);       // 0.1 per block
+        consensus.blockTokenRewardsLegacy.emplace(CommunityAccountType::IncentiveFunding, 10 * COIN / 50); // normalized to (COIN == 100%) // 10 per block
+        consensus.blockTokenRewardsLegacy.emplace(CommunityAccountType::AnchorReward, COIN/10 / 50);       // 0.1 per block
 
         // New coinbase reward distribution
         consensus.dist.masternode = 3333; // 33.33%
@@ -1164,12 +1147,12 @@ public:
         consensus.dist.options = 988; // 9.88%
         consensus.dist.unallocated = 173; // 1.73%
 
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::AnchorReward, consensus.dist.anchor);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::IncentiveFunding, consensus.dist.liquidity);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Loan, consensus.dist.loan);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Options, consensus.dist.options);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::Unallocated, consensus.dist.unallocated);
-        consensus.newNonUTXOSubsidies.emplace(CommunityAccountType::CommunityDevFunds, consensus.dist.community);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::AnchorReward, consensus.dist.anchor);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::IncentiveFunding, consensus.dist.liquidity);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Loan, consensus.dist.loan);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Options, consensus.dist.options);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::Unallocated, consensus.dist.unallocated);
+        consensus.blockTokenRewards.emplace(CommunityAccountType::CommunityDevFunds, consensus.dist.community);
 
         // EVM chain id
         consensus.evmChainId = 1133; // regtest chain ID
@@ -1213,15 +1196,36 @@ public:
         consensus.smartContracts[SMART_CONTRACT_DFIP_2203] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1})));
         consensus.smartContracts[SMART_CONTRACT_DFIP2206F] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2})));
 
+
+        struct KeyPairString {
+            std::string pub;
+            std::string priv;
+        };
         // owner base58, operator base58
-        vMasternodes.push_back({"mwsZw8nF7pKxWH8eoKL9tPxTpaFkz7QeLU", "mswsMVsyGMj1FzDMbbxw2QW3KvQAv2FKiy"});
-        vMasternodes.push_back({"msER9bmJjyEemRpQoS8YYVL21VyZZrSgQ7", "mps7BdmwEF2vQ9DREDyNPibqsuSRZ8LuwQ"});
-        vMasternodes.push_back({"myF3aHuxtEuqqTw44EurtVs6mjyc1QnGUS", "mtbWisYQmw9wcaecvmExeuixG7rYGqKEU4"});
-        vMasternodes.push_back({"mwyaBGGE7ka58F7aavH5hjMVdJENP9ZEVz", "n1n6Z5Zdoku4oUnrXeQ2feLz3t7jmVLG9t"});
-        vMasternodes.push_back({"mgsE1SqrcfUhvuYuRjqy6rQCKmcCVKNhMu", "mzqdipBJcKX9rXXxcxw2kTHC3Xjzd3siKg"});
-        vMasternodes.push_back({"mud4VMfbBqXNpbt8ur33KHKx8pk3npSq8c", "mk5DkY4qcV6CUpuxDVyD3AHzRq5XK9kbRN"});
-        vMasternodes.push_back({"bcrt1qyrfrpadwgw7p5eh3e9h3jmu4kwlz4prx73cqny", "bcrt1qmfvw3dp3u6fdvqkdc0y3lr0e596le9cf22vtsv"});
-        vMasternodes.push_back({"bcrt1qyeuu9rvq8a67j86pzvh5897afdmdjpyankp4mu", "bcrt1qurwyhta75n2g75u2u5nds9p6w9v62y8wr40d2r"});
+        std::vector<KeyPairString> mnkeys = {
+            {"mwsZw8nF7pKxWH8eoKL9tPxTpaFkz7QeLU", "cRiRQ9cHmy5evDqNDdEV8f6zfbK6epi9Fpz4CRZsmLEmkwy54dWz"},
+            {"mswsMVsyGMj1FzDMbbxw2QW3KvQAv2FKiy", "cPGEaz8AGiM71NGMRybbCqFNRcuUhg3uGvyY4TFE1BZC26EW2PkC"},
+            {"msER9bmJjyEemRpQoS8YYVL21VyZZrSgQ7", "cSCmN1tjcR2yR1eaQo9WmjTMR85SjEoNPqMPWGAApQiTLJH8JF7W"},
+            {"mps7BdmwEF2vQ9DREDyNPibqsuSRZ8LuwQ", "cVNTRYV43guugJoDgaiPZESvNtnfnUW19YEjhybihwDbLKjyrZNV"},
+            {"myF3aHuxtEuqqTw44EurtVs6mjyc1QnGUS", "cSXiqwTiYzECugcvCT4PyPKz2yKaTST8HowFVBBjccZCPkX6wsE9"},
+            {"mtbWisYQmw9wcaecvmExeuixG7rYGqKEU4", "cPh5YaousYQ92tNd9FkiiS26THjSVBDHUMHZzUiBFbtGNS4Uw9AD"},
+            {"mwyaBGGE7ka58F7aavH5hjMVdJENP9ZEVz", "cVA52y8ABsUYNuXVJ17d44N1wuSmeyPtke9urw4LchTyKsaGDMbY"},
+            {"n1n6Z5Zdoku4oUnrXeQ2feLz3t7jmVLG9t", "cV9tJBgAnSfFmPaC6fWWvA9StLKkU3DKV7eXJHjWMUENQ8cKJDkL"},
+            {"mgsE1SqrcfUhvuYuRjqy6rQCKmcCVKNhMu", "cRJyBuQPuUhYzN5F2Uf35958oK9AzZ5UscRfVmaRr8ktWq6Ac23u"},
+            {"mzqdipBJcKX9rXXxcxw2kTHC3Xjzd3siKg", "cQYJ87qk39i3uFsXBZ2EkwdX1h72q1RQcX9V8X7PPydFPgujxrCy"},
+            {"mud4VMfbBqXNpbt8ur33KHKx8pk3npSq8c", "cPjeCNka7omVbKKfywPVQyBig9eopBHy6eJqLzrdJqMP4DXApkcb"},
+            {"mk5DkY4qcV6CUpuxDVyD3AHzRq5XK9kbRN", "cV6Hjhutf11RvFHaERkp52QNynm2ifNmtUfP8EwRRMg6NaaQsHTe"},
+            {"bcrt1qyrfrpadwgw7p5eh3e9h3jmu4kwlz4prx73cqny", "cR4qgUdPhANDVF3bprcp5N9PNW2zyogDx6DGu2wHh2qtJB1L1vQj"},
+            {"bcrt1qmfvw3dp3u6fdvqkdc0y3lr0e596le9cf22vtsv", "cVsa2wQvCjZZ54jGteQ8qiQbQLJQmZSBWriYUYyXbcaqUJFqK5HR"},
+            {"bcrt1qyeuu9rvq8a67j86pzvh5897afdmdjpyankp4mu", "cUX8AEUZYsZxNUh5fTS7ZGnF6SPQuTeTDTABGrp5dbPftCga2zcp"},
+            {"bcrt1qurwyhta75n2g75u2u5nds9p6w9v62y8wr40d2r", "cUp5EVEjuAGpemSuejP36TWWuFKzuCbUJ4QAKJTiSSB2vXzDLsJW"},
+        };
+
+        for(size_t i = 0; i < mnkeys.size(); i+=2) {
+            auto ownerPubKey = mnkeys[i].pub;
+            auto operatorPubKey = mnkeys[i+1].pub;
+            vMasternodes.push_back({ ownerPubKey, operatorPubKey });
+        }
 
         // For testing send after Eunos: 93ViFmLeJVgKSPxWGQHmSdT5RbeGDtGW4bsiwQM2qnQyucChMqQ
         consensus.burnAddress = GetScriptForDestination(DecodeDestination("mfburnZSAM7Gs1hpDeNaMotJXSGA7edosG", *this));
@@ -1310,33 +1314,30 @@ std::optional<int> UpdateHeightValidation(const std::string& argName, const std:
 
 void SetupCommonArgActivationParams(Consensus::Params &consensus) {
     UpdateHeightValidation("Segwit", "-segwitheight", consensus.SegwitHeight);
-    UpdateHeightValidation("AMK", "-amkheight", consensus.AMKHeight);
-    UpdateHeightValidation("Bayfront", "-bayfrontheight", consensus.BayfrontHeight);
-    UpdateHeightValidation("Bayfront Gardens", "-bayfrontgardensheight", consensus.BayfrontGardensHeight);
-    UpdateHeightValidation("Clarke Quay", "-clarkequayheight", consensus.ClarkeQuayHeight);
-    UpdateHeightValidation("Dakota", "-dakotaheight", consensus.DakotaHeight);
-    UpdateHeightValidation("Dakota Crescent", "-dakotacrescentheight", consensus.DakotaCrescentHeight);
-    auto eunosHeight = UpdateHeightValidation("Eunos", "-eunosheight", consensus.EunosHeight);
+    UpdateHeightValidation("AMK", "-amkheight", consensus.DF1AMKHeight);
+    UpdateHeightValidation("Bayfront", "-bayfrontheight", consensus.DF2BayfrontHeight);
+    UpdateHeightValidation("Bayfront Gardens", "-bayfrontgardensheight", consensus.DF4BayfrontGardensHeight);
+    UpdateHeightValidation("Clarke Quay", "-clarkequayheight", consensus.DF5ClarkeQuayHeight);
+    UpdateHeightValidation("Dakota", "-dakotaheight", consensus.DF6DakotaHeight);
+    UpdateHeightValidation("Dakota Crescent", "-dakotacrescentheight", consensus.DF7DakotaCrescentHeight);
+    auto eunosHeight = UpdateHeightValidation("Eunos", "-eunosheight", consensus.DF8EunosHeight);
     if (eunosHeight.has_value()){
-        consensus.EunosKampungHeight = static_cast<int>(eunosHeight.value());
+        consensus.DF9EunosKampungHeight = static_cast<int>(eunosHeight.value());
     }
-    UpdateHeightValidation("Eunos Paya", "-eunospayaheight", consensus.EunosPayaHeight);
-    UpdateHeightValidation("Fort Canning", "-fortcanningheight", consensus.FortCanningHeight);
-    UpdateHeightValidation("Fort Canning Museum", "-fortcanningmuseumheight", consensus.FortCanningMuseumHeight);
-    UpdateHeightValidation("Fort Canning Park", "-fortcanningparkheight", consensus.FortCanningParkHeight);
-    UpdateHeightValidation("Fort Canning Hill", "-fortcanninghillheight", consensus.FortCanningHillHeight);
-    UpdateHeightValidation("Fort Canning Road", "-fortcanningroadheight", consensus.FortCanningRoadHeight);
-    UpdateHeightValidation("Fort Canning Crunch", "-fortcanningcrunchheight", consensus.FortCanningCrunchHeight);
-    UpdateHeightValidation("Fort Canning Spring", "-fortcanningspringheight", consensus.FortCanningSpringHeight);
-    UpdateHeightValidation("Fort Canning Great World", "-fortcanninggreatworldheight", consensus.FortCanningGreatWorldHeight);
-    UpdateHeightValidation("Fort Canning Great World", "-greatworldheight", consensus.FortCanningGreatWorldHeight);
-    UpdateHeightValidation("Fort Canning Epilogue", "-fortcanningepilogueheight", consensus.FortCanningEpilogueHeight);
-    UpdateHeightValidation("Grand Central", "-grandcentralheight", consensus.GrandCentralHeight);
-    UpdateHeightValidation("Grand Central Epilogue", "-grandcentralepilogueheight", consensus.GrandCentralEpilogueHeight);
-    UpdateHeightValidation("Next Network Upgrade", "-nextnetworkupgradeheight", consensus.NextNetworkUpgradeHeight);
-    UpdateHeightValidation("Changi Intermediate", "-changiintermediateheight", consensus.ChangiIntermediateHeight);
-    UpdateHeightValidation("Changi Intermediate2", "-changiintermediate2height", consensus.ChangiIntermediateHeight2);
-    UpdateHeightValidation("Changi Intermediate3", "-changiintermediate3height", consensus.ChangiIntermediateHeight3);
+    UpdateHeightValidation("Eunos Paya", "-eunospayaheight", consensus.DF10EunosPayaHeight);
+    UpdateHeightValidation("Fort Canning", "-fortcanningheight", consensus.DF11FortCanningHeight);
+    UpdateHeightValidation("Fort Canning Museum", "-fortcanningmuseumheight", consensus.DF12FortCanningMuseumHeight);
+    UpdateHeightValidation("Fort Canning Park", "-fortcanningparkheight", consensus.DF13FortCanningParkHeight);
+    UpdateHeightValidation("Fort Canning Hill", "-fortcanninghillheight", consensus.DF14FortCanningHillHeight);
+    UpdateHeightValidation("Fort Canning Road", "-fortcanningroadheight", consensus.DF15FortCanningRoadHeight);
+    UpdateHeightValidation("Fort Canning Crunch", "-fortcanningcrunchheight", consensus.DF16FortCanningCrunchHeight);
+    UpdateHeightValidation("Fort Canning Spring", "-fortcanningspringheight", consensus.DF17FortCanningSpringHeight);
+    UpdateHeightValidation("Fort Canning Great World", "-fortcanninggreatworldheight", consensus.DF18FortCanningGreatWorldHeight);
+    UpdateHeightValidation("Fort Canning Great World", "-greatworldheight", consensus.DF18FortCanningGreatWorldHeight);
+    UpdateHeightValidation("Fort Canning Epilogue", "-fortcanningepilogueheight", consensus.DF19FortCanningEpilogueHeight);
+    UpdateHeightValidation("Grand Central", "-grandcentralheight", consensus.DF20GrandCentralHeight);
+    UpdateHeightValidation("Grand Central Epilogue", "-grandcentralepilogueheight", consensus.DF21GrandCentralEpilogueHeight);
+    UpdateHeightValidation("Metachain", "-metachainheight", consensus.DF22MetachainHeight);
 
     if (gArgs.GetBoolArg("-simulatemainnet", false)) {
         consensus.pos.nTargetTimespan = 5 * 60; // 5 min == 10 blocks
@@ -1467,7 +1468,9 @@ void ClearCheckpoints(CChainParams &params) {
 
 Res UpdateCheckpointsFromFile(CChainParams &params, const std::string &fileName) {
     std::ifstream file(fileName);
-    Require(file.good(), [=]{ return strprintf("Could not read %s. Ensure it exists and has read permissions", fileName); });
+    if (!file.good()) {
+        return Res::Err("Could not read %s. Ensure it exists and has read permissions", fileName);
+    }
 
     ClearCheckpoints(params);
 
@@ -1479,13 +1482,19 @@ Res UpdateCheckpointsFromFile(CChainParams &params, const std::string &fileName)
 
         std::istringstream iss(trimmed);
         std::string hashStr, heightStr;
-        Require((iss >> heightStr >> hashStr), [=]{ return strprintf("Error parsing line %s", trimmed); });
+        if (!(iss >> heightStr >> hashStr)) {
+            return Res::Err("Error parsing line %s", trimmed);
+        }
 
         uint256 hash;
-        Require(ParseHashStr(hashStr, hash), [=]{ return strprintf("Invalid hash: %s", hashStr); });
+        if (!ParseHashStr(hashStr, hash)) {
+            return Res::Err("Invalid hash: %s", hashStr);
+        }
 
         int32_t height;
-        Require(ParseInt32(heightStr, &height), [=]{ return strprintf("Invalid height: %s", heightStr); });
+        if (!ParseInt32(heightStr, &height)) {
+            return Res::Err("Invalid height: %s", heightStr);
+        }
 
         params.checkpointData.mapCheckpoints[height] = hash;
     }

@@ -1,18 +1,21 @@
+use std::{error::Error, sync::Arc};
+
+use anyhow::format_err;
 use ethereum::{Account, Log};
+use ethereum_types::{H160, H256, U256};
 use evm::backend::{Apply, ApplyBackend, Backend, Basic};
 use hash_db::Hasher as _;
 use log::{debug, trace};
-use primitive_types::{H160, H256, U256};
 use rlp::{Decodable, Encodable, Rlp};
-use sp_core::hexdisplay::AsBytesRef;
-use sp_core::Blake2Hasher;
+use sp_core::{hexdisplay::AsBytesRef, Blake2Hasher};
 use vsdb_trie_db::{MptOnce, MptRo};
 
 use crate::{
+    fee::calculate_gas_fee,
     storage::{traits::BlockStorage, Storage},
-    traits::BridgeBackend,
     transaction::SignedTx,
     trie::TrieDBStore,
+    Result,
 };
 
 type Hasher = Blake2Hasher;
@@ -21,14 +24,16 @@ fn is_empty_account(account: &Account) -> bool {
     account.balance.is_zero() && account.nonce.is_zero() && account.code_hash.is_zero()
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Vicinity {
     pub gas_price: U256,
     pub origin: H160,
     pub beneficiary: H160,
     pub block_number: U256,
     pub timestamp: U256,
-    pub gas_limit: U256,
+    pub total_gas_used: U256,
+    pub block_difficulty: U256,
+    pub block_gas_limit: U256,
     pub block_base_fee_per_gas: U256,
     pub block_randomness: Option<H256>,
 }
@@ -40,8 +45,6 @@ pub struct EVMBackend {
     pub vicinity: Vicinity,
 }
 
-type Result<T> = std::result::Result<T, EVMBackendError>;
-
 impl EVMBackend {
     pub fn from_root(
         state_root: H256,
@@ -52,7 +55,7 @@ impl EVMBackend {
         let state = trie_store
             .trie_db
             .trie_restore(&[0], None, state_root.into())
-            .map_err(|e| EVMBackendError::TrieRestoreFailed(e.to_string()))?;
+            .map_err(|e| BackendError::TrieRestoreFailed(e.to_string()))?;
 
         Ok(EVMBackend {
             state,
@@ -65,7 +68,7 @@ impl EVMBackend {
     pub fn apply<I: IntoIterator<Item = (H256, H256)>>(
         &mut self,
         address: H160,
-        basic: Basic,
+        basic: Option<Basic>,
         code: Option<Vec<u8>>,
         storage: I,
         reset_storage: bool,
@@ -81,35 +84,48 @@ impl EVMBackend {
             self.trie_store
                 .trie_db
                 .trie_create(address.as_bytes(), None, true)
-                .map_err(|e| EVMBackendError::TrieCreationFailed(e.to_string()))?
+                .map_err(|e| BackendError::TrieCreationFailed(e.to_string()))?
         } else {
             self.trie_store
                 .trie_db
                 .trie_restore(address.as_bytes(), None, account.storage_root.into())
-                .map_err(|e| EVMBackendError::TrieRestoreFailed(e.to_string()))?
+                .map_err(|e| BackendError::TrieRestoreFailed(e.to_string()))?
         };
 
         storage.into_iter().for_each(|(k, v)| {
             debug!("Apply::Modify storage, key: {:x} value: {:x}", k, v);
             let _ = storage_trie.insert(k.as_bytes(), v.as_bytes());
+            storage_trie.commit();
         });
 
-        let code_hash = code.map_or(account.code_hash, |code| {
-            let code_hash = Hasher::hash(&code);
-            self.storage.put_code(code_hash, code);
-            code_hash
-        });
+        let code_hash = match code {
+            None => account.code_hash,
+            Some(code) => {
+                let code_hash = Hasher::hash(&code);
+                self.storage.put_code(code_hash, code)?;
+                code_hash
+            }
+        };
 
-        let new_account = Account {
-            nonce: basic.nonce,
-            balance: basic.balance,
-            code_hash,
-            storage_root: storage_trie.commit().into(),
+        let new_account = match basic {
+            Some(basic) => Account {
+                nonce: basic.nonce,
+                balance: basic.balance,
+                code_hash,
+                storage_root: storage_trie.commit().into(),
+            },
+            None => Account {
+                nonce: account.nonce,
+                balance: account.balance,
+                code_hash,
+                storage_root: storage_trie.commit().into(),
+            },
         };
 
         self.state
             .insert(address.as_bytes(), new_account.rlp_bytes().as_ref())
-            .map_err(|e| EVMBackendError::TrieError(format!("{e}")))?;
+            .map_err(|e| BackendError::TrieError(format!("{e}")))?;
+        self.state.commit();
 
         Ok(new_account)
     }
@@ -126,8 +142,13 @@ impl EVMBackend {
     pub fn update_vicinity_from_tx(&mut self, tx: &SignedTx) {
         self.vicinity = Vicinity {
             origin: tx.sender,
-            gas_price: tx.gas_price(),
-            gas_limit: tx.gas_limit(),
+            ..self.vicinity
+        };
+    }
+
+    pub fn update_vicinity_with_gas_used(&mut self, gas_used: U256) {
+        self.vicinity = Vicinity {
+            total_gas_used: gas_used,
             ..self.vicinity
         };
     }
@@ -138,39 +159,53 @@ impl EVMBackend {
         self.state.ro_handle(root)
     }
 
-    pub fn deduct_prepay_gas(&mut self, sender: H160, prepay_gas: U256) {
-        debug!(target: "backend", "[deduct_prepay_gas] Deducting {:#x} from {:#x}", prepay_gas, sender);
+    pub fn deduct_prepay_gas_fee(&mut self, sender: H160, prepay_fee: U256) -> Result<()> {
+        debug!(target: "backend", "[deduct_prepay_gas_fee] Deducting {:#x} from {:#x}", prepay_fee, sender);
 
         let basic = self.basic(sender);
-        let balance = basic.balance.saturating_sub(prepay_gas);
+        let balance = basic.balance.checked_sub(prepay_fee).ok_or_else(|| {
+            BackendError::DeductPrepayGasFailed(String::from(
+                "failed checked sub prepay gas with account balance",
+            ))
+        })?;
         let new_basic = Basic { balance, ..basic };
 
-        self.apply(sender, new_basic, None, Vec::new(), false)
-            .expect("Error deducting account balance");
+        self.apply(sender, Some(new_basic), None, Vec::new(), false)
+            .map_err(|e| BackendError::DeductPrepayGasFailed(e.to_string()))?;
         self.commit();
+
+        Ok(())
     }
 
-    pub fn refund_unused_gas(
+    pub fn refund_unused_gas_fee(
         &mut self,
-        sender: H160,
-        gas_limit: U256,
+        signed_tx: &SignedTx,
         used_gas: U256,
-        gas_price: U256,
-    ) {
-        let refund_gas = gas_limit.saturating_sub(used_gas);
-        let refund_amount = refund_gas.saturating_mul(gas_price);
+        base_fee: U256,
+    ) -> Result<()> {
+        let refund_gas = signed_tx.gas_limit().checked_sub(used_gas).ok_or_else(|| {
+            BackendError::RefundUnusedGasFailed(String::from(
+                "failed checked sub used gas with gas limit",
+            ))
+        })?;
+        let refund_amount = calculate_gas_fee(signed_tx, refund_gas, base_fee)?;
 
-        debug!(target: "backend", "[refund_unused_gas] Refunding {:#x} to {:#x}", refund_amount, sender);
+        debug!(target: "backend", "[refund_unused_gas_fee] Refunding {:#x} to {:#x}", refund_amount, signed_tx.sender);
 
-        let basic = self.basic(sender);
-        let new_basic = Basic {
-            balance: basic.balance.saturating_add(refund_amount),
-            ..basic
-        };
+        let basic = self.basic(signed_tx.sender);
+        let balance = basic.balance.checked_add(refund_amount).ok_or_else(|| {
+            BackendError::RefundUnusedGasFailed(String::from(
+                "failed checked add refund amount with account balance",
+            ))
+        })?;
 
-        self.apply(sender, new_basic, None, Vec::new(), false)
-            .expect("Error refunding account balance");
+        let new_basic = Basic { balance, ..basic };
+
+        self.apply(signed_tx.sender, Some(new_basic), None, Vec::new(), false)
+            .map_err(|e| BackendError::RefundUnusedGasFailed(e.to_string()))?;
         self.commit();
+
+        Ok(())
     }
 }
 
@@ -187,11 +222,54 @@ impl EVMBackend {
             .map(|acc| acc.nonce)
             .unwrap_or_default()
     }
+
+    pub fn get_balance(&self, address: &H160) -> U256 {
+        self.get_account(address)
+            .map(|acc| acc.balance)
+            .unwrap_or_default()
+    }
+
+    pub fn get_contract_storage(&self, contract: H160, storage_index: &[u8]) -> Result<U256> {
+        let Some(account) = self.get_account(&contract) else {
+            return Ok(U256::zero());
+        };
+
+        let state = self
+            .trie_store
+            .trie_db
+            .trie_restore(contract.as_ref(), None, account.storage_root.into())
+            .map_err(|e| BackendError::TrieRestoreFailed(e.to_string()))?;
+
+        Ok(U256::from(
+            state
+                .get(storage_index)
+                .unwrap_or_default()
+                .unwrap_or_default()
+                .as_slice(),
+        ))
+    }
+
+    pub fn deploy_contract(
+        &mut self,
+        address: &H160,
+        code: Vec<u8>,
+        storage: Vec<(H256, H256)>,
+    ) -> Result<()> {
+        self.apply(*address, None, Some(code), storage, true)?;
+
+        Ok(())
+    }
+
+    pub fn update_storage(&mut self, address: &H160, storage: Vec<(H256, H256)>) -> Result<()> {
+        self.apply(*address, None, None, storage, false)?;
+
+        Ok(())
+    }
 }
 
 impl Backend for EVMBackend {
     fn gas_price(&self) -> U256 {
-        trace!(target: "backend", "[EVMBackend] Getting gas");
+        trace!(target: "backend", "[EVMBackend] Getting gas price");
         self.vicinity.gas_price
     }
 
@@ -204,6 +282,7 @@ impl Backend for EVMBackend {
         trace!(target: "backend", "[EVMBackend] Getting block hash for block {:x?}", number);
         self.storage
             .get_block_by_number(&number)
+            .expect("Could not get block by number")
             .map_or(H256::zero(), |block| block.header.hash())
     }
 
@@ -221,7 +300,7 @@ impl Backend for EVMBackend {
     }
 
     fn block_difficulty(&self) -> U256 {
-        U256::zero()
+        self.vicinity.block_difficulty
     }
 
     fn block_randomness(&self) -> Option<H256> {
@@ -229,7 +308,7 @@ impl Backend for EVMBackend {
     }
 
     fn block_gas_limit(&self) -> U256 {
-        self.vicinity.gas_limit
+        self.vicinity.block_gas_limit
     }
 
     fn block_base_fee_per_gas(&self) -> U256 {
@@ -258,7 +337,7 @@ impl Backend for EVMBackend {
     fn code(&self, address: H160) -> Vec<u8> {
         trace!(target: "backend", "[EVMBackend] code for address {:x?}", address);
         self.get_account(&address)
-            .and_then(|account| self.storage.get_code_by_hash(account.code_hash))
+            .and_then(|account| self.storage.get_code_by_hash(account.code_hash).unwrap())
             .unwrap_or_default()
     }
 
@@ -304,11 +383,11 @@ impl ApplyBackend for EVMBackend {
                     );
 
                     let new_account = self
-                        .apply(address, basic, code, storage, reset_storage)
+                        .apply(address, Some(basic), code, storage, reset_storage)
                         .expect("Error applying state");
 
                     if is_empty_account(&new_account) && delete_empty {
-                        debug!("Deleting empty address {}", address);
+                        debug!("Deleting empty address {:x?}", address);
                         self.trie_store.trie_db.trie_remove(address.as_bytes());
                         self.state
                             .remove(address.as_bytes())
@@ -316,7 +395,7 @@ impl ApplyBackend for EVMBackend {
                     }
                 }
                 Apply::Delete { address } => {
-                    debug!("Deleting address {}", address);
+                    debug!("Deleting address {:x?}", address);
                     self.trie_store.trie_db.trie_remove(address.as_bytes());
                     self.state
                         .remove(address.as_bytes())
@@ -327,43 +406,45 @@ impl ApplyBackend for EVMBackend {
     }
 }
 
-impl BridgeBackend for EVMBackend {
-    fn add_balance(&mut self, address: H160, amount: U256) -> Result<()> {
+impl EVMBackend {
+    pub fn add_balance(&mut self, address: H160, amount: U256) -> Result<()> {
         let basic = self.basic(address);
 
         let new_basic = Basic {
-            balance: basic.balance + amount,
+            balance: basic
+                .balance
+                .checked_add(amount)
+                .ok_or_else(|| format_err!("Balance overflow"))?,
             ..basic
         };
 
-        self.apply(address, new_basic, None, Vec::new(), false)?;
+        self.apply(address, Some(new_basic), None, Vec::new(), false)?;
         Ok(())
     }
 
-    fn sub_balance(&mut self, address: H160, amount: U256) -> Result<()> {
+    pub fn sub_balance(&mut self, address: H160, amount: U256) -> Result<()> {
         let account = self
             .get_account(&address)
-            .ok_or(EVMBackendError::NoSuchAccount(address))?;
+            .ok_or(BackendError::NoSuchAccount(address))?;
 
         if account.balance < amount {
-            Err(EVMBackendError::InsufficientBalance(InsufficientBalance {
+            return Err(BackendError::InsufficientBalance(InsufficientBalance {
                 address,
                 account_balance: account.balance,
                 amount,
-            }))
-        } else {
-            let new_basic = Basic {
-                balance: account.balance - amount,
-                nonce: account.nonce,
-            };
-
-            self.apply(address, new_basic, None, Vec::new(), false)?;
-            Ok(())
+            })
+            .into());
         }
+
+        let new_basic = Basic {
+            balance: account.balance - amount, // sub is safe due to check above
+            nonce: account.nonce,
+        };
+
+        self.apply(address, Some(new_basic), None, Vec::new(), false)?;
+        Ok(())
     }
 }
-
-use std::{error::Error, fmt, sync::Arc};
 
 #[derive(Debug)]
 pub struct InsufficientBalance {
@@ -373,40 +454,46 @@ pub struct InsufficientBalance {
 }
 
 #[derive(Debug)]
-pub enum EVMBackendError {
+pub enum BackendError {
     TrieCreationFailed(String),
     TrieRestoreFailed(String),
     TrieError(String),
     NoSuchAccount(H160),
     InsufficientBalance(InsufficientBalance),
+    DeductPrepayGasFailed(String),
+    RefundUnusedGasFailed(String),
 }
 
-impl fmt::Display for EVMBackendError {
+use std::fmt;
+
+impl fmt::Display for BackendError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            EVMBackendError::TrieCreationFailed(e) => {
-                write!(f, "EVMBackendError: Failed to create trie {e}")
+            BackendError::TrieCreationFailed(e) => {
+                write!(f, "BackendError: Failed to create trie {e}")
             }
-            EVMBackendError::TrieRestoreFailed(e) => {
-                write!(f, "EVMBackendError: Failed to restore trie {e}")
+            BackendError::TrieRestoreFailed(e) => {
+                write!(f, "BackendError: Failed to restore trie {e}")
             }
-            EVMBackendError::TrieError(e) => write!(f, "EVMBackendError: Trie error {e}"),
-            EVMBackendError::NoSuchAccount(address) => {
-                write!(
-                    f,
-                    "EVMBackendError: No such acccount for address {}",
-                    address
-                )
+            BackendError::TrieError(e) => write!(f, "BackendError: Trie error {e}"),
+            BackendError::NoSuchAccount(address) => {
+                write!(f, "BackendError: No such acccount for address {address}")
             }
-            EVMBackendError::InsufficientBalance(InsufficientBalance {
+            BackendError::InsufficientBalance(InsufficientBalance {
                 address,
                 account_balance,
                 amount,
             }) => {
-                write!(f, "EVMBackendError: Insufficient balance for address {address}, trying to deduct {amount} but address has only {account_balance}")
+                write!(f, "BackendError: Insufficient balance for address {address}, trying to deduct {amount} but address has only {account_balance}")
+            }
+            BackendError::DeductPrepayGasFailed(e) => {
+                write!(f, "BackendError: Deduct prepay gas failed {e}")
+            }
+            BackendError::RefundUnusedGasFailed(e) => {
+                write!(f, "BackendError: Refund unused gas failed {e}")
             }
         }
     }
 }
 
-impl Error for EVMBackendError {}
+impl Error for BackendError {}
