@@ -1,4 +1,6 @@
-mod backend;
+//! Defichain EVM consensus, runtime and storage implementation
+
+pub mod backend;
 pub mod block;
 pub mod blocktemplate;
 pub mod bytes;
@@ -16,6 +18,8 @@ mod precompiles;
 pub mod receipt;
 pub mod services;
 pub mod storage;
+pub mod subscription;
+pub mod trace;
 pub mod transaction;
 mod trie;
 pub mod weiamount;
@@ -50,8 +54,12 @@ pub enum EVMError {
     StorageError(String),
     #[error("EVM: serde_json error")]
     JsonError(#[from] serde_json::Error),
+    #[error("EVM: serde_json error")]
+    JsonRpcError(#[from] jsonrpsee_core::Error),
     #[error("EVM: rocksdb error")]
     RocksDBError(#[from] rocksdb::Error),
+    #[error("EVM: db error")]
+    DBError(#[from] ain_db::DBError),
     #[error("EVM: ethabi error")]
     EthAbiError(#[from] ethabi::Error),
     #[error(transparent)]

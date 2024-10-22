@@ -79,6 +79,7 @@ static constexpr CAmount COIN = 100000000;
 static constexpr CAmount CENT = 1000000;
 static constexpr int64_t WEI_IN_GWEI    = 1000000000;
 static constexpr int64_t CAMOUNT_TO_GWEI = 10;
+static constexpr CAmount HIGH_PRECISION_SCALER = COIN * COIN;  // 1,0000,0000,0000,0000
 
 //Converts the given value to decimal format string with COIN precision.
 inline std::string GetDecimalString(CAmount nValue)
@@ -111,12 +112,26 @@ inline ResVal<CAmount> SafeAdd(CAmount _a, CAmount _b) {
     return {(CAmount) sum, Res::Ok()};
 }
 
+inline CAmount MultiplyDivideAmounts(CAmount a, CAmount b, CAmount c) {
+    return (arith_uint256(a) * arith_uint256(b) / arith_uint256(c)).GetLow64();
+}
+
 inline CAmount MultiplyAmounts(CAmount a, CAmount b)
 {
     return (arith_uint256(a) * arith_uint256(b) / arith_uint256(COIN)).GetLow64();
 }
 
 inline CAmount DivideAmounts(CAmount a, CAmount b)
+{
+    return (arith_uint256(a) * arith_uint256(COIN) / arith_uint256(b)).GetLow64();
+}
+
+inline base_uint<128> MultiplyAmounts(base_uint<128> a, CAmount b)
+{
+    return (arith_uint256(a) * arith_uint256(b) / arith_uint256(COIN)).GetLow64();
+}
+
+inline base_uint<128> DivideAmounts(base_uint<128> a, CAmount b)
 {
     return (arith_uint256(a) * arith_uint256(COIN) / arith_uint256(b)).GetLow64();
 }

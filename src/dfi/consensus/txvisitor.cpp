@@ -13,6 +13,8 @@
 #include <dfi/icxorder.h>
 #include <dfi/loan.h>
 #include <dfi/masternodes.h>
+#include <dfi/mn_checks.h>
+#include <validation.h>
 
 constexpr std::string_view ERR_STRING_MIN_COLLATERAL_DFI_PCT =
     "At least 50%% of the minimum required collateral must be in DFI";
@@ -89,32 +91,18 @@ Res GetERC55AddressFromAuth(const CTransaction &tx, const CCoinsViewCache &coins
     return DeFiErrors::InvalidAuth();
 }
 
-CCustomTxVisitor::CCustomTxVisitor(const CTransaction &tx,
-                                   uint32_t height,
-                                   const CCoinsViewCache &coins,
-                                   CCustomCSView &mnview,
-                                   const Consensus::Params &consensus,
-                                   const uint64_t time,
-                                   const uint32_t txn,
-                                   const std::shared_ptr<CScopedTemplateID> &evmTemplateId,
-                                   const bool isEvmEnabledForBlock,
-                                   const bool evmPreValidate)
-    : height(height),
-      mnview(mnview),
-      tx(tx),
-      coins(coins),
-      consensus(consensus),
-      time(time),
-      txn(txn),
-      evmTemplateId(evmTemplateId),
-      isEvmEnabledForBlock(isEvmEnabledForBlock),
-      evmPreValidate(evmPreValidate) {}
+CCustomTxVisitor::CCustomTxVisitor(BlockContext &blockCtx, const TransactionContext &txCtx)
+    : blockCtx(blockCtx),
+      txCtx(txCtx) {}
 
 Res CCustomTxVisitor::HasAuth(const CScript &auth) const {
+    const auto &coins = txCtx.GetCoins();
+    const auto &tx = txCtx.GetTransaction();
     return ::HasAuth(tx, coins, auth);
 }
 
 Res CCustomTxVisitor::HasCollateralAuth(const uint256 &collateralTx) const {
+    const auto &coins = txCtx.GetCoins();
     const Coin &auth = coins.AccessCoin(COutPoint(collateralTx, 1));  // always n=1 output
     if (!HasAuth(auth.out.scriptPubKey)) {
         return Res::Err("tx must have at least one input from the owner");
@@ -122,18 +110,9 @@ Res CCustomTxVisitor::HasCollateralAuth(const uint256 &collateralTx) const {
     return Res::Ok();
 }
 
-Res CCustomTxVisitor::HasFoundationAuth() const {
-    auto members = consensus.foundationMembers;
-    const auto attributes = mnview.GetAttributes();
-    assert(attributes);
-    if (attributes->GetValue(CDataStructureV0{AttributeTypes::Param, ParamIDs::Feature, DFIPKeys::GovFoundation},
-                             false)) {
-        if (const auto databaseMembers = attributes->GetValue(
-                CDataStructureV0{AttributeTypes::Param, ParamIDs::Foundation, DFIPKeys::Members}, std::set<CScript>{});
-            !databaseMembers.empty()) {
-            members = databaseMembers;
-        }
-    }
+static Res HasAuthInner(const TransactionContext &txCtx, const std::set<CScript> &members) {
+    const auto &coins = txCtx.GetCoins();
+    const auto &tx = txCtx.GetTransaction();
 
     for (const auto &input : tx.vin) {
         const Coin &coin = coins.AccessCoin(input.prevout);
@@ -144,8 +123,101 @@ Res CCustomTxVisitor::HasFoundationAuth() const {
     return Res::Err("tx not from foundation member");
 }
 
+Res AuthManager::HasFoundationAuth() {
+    if (foundationAuth) {
+        return *foundationAuth;
+    }
+    auto &mnview = blockCtx.GetView();
+
+    const auto members = GetFoundationMembers(mnview);
+    foundationAuth = HasAuthInner(txCtx, members);
+    return *foundationAuth;
+}
+
+Res AuthManager::HasGovernanceAuth() {
+    if (governanceAuth) {
+        return *governanceAuth;
+    }
+
+    auto &mnview = blockCtx.GetView();
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+
+    if (height < consensus.DF24Height) {
+        governanceAuth = Res::Err("Governance cannot be used before the DF24Height");
+        return *governanceAuth;
+    }
+
+    const auto members = GetGovernanceMembers(mnview);
+    governanceAuth = HasAuthInner(txCtx, members);
+    return *governanceAuth;
+}
+
+Res CanSetGovInternal(AuthManager &g, const CAttributeType &attribute) {
+    const auto attrV0 = std::get_if<CDataStructureV0>(&attribute);
+    if (!attrV0) {
+        return Res::Err("Attribute type check failed");
+    }
+    if ((attrV0->type == AttributeTypes::Param && attrV0->typeId == ParamIDs::Foundation) ||
+        (attrV0->type == AttributeTypes::Param && attrV0->typeId == ParamIDs::Feature &&
+         attrV0->key == DFIPKeys::GovFoundation)) {
+        if (g.HasFoundationAuth()) {
+            return Res::Ok();
+        }
+        return Res::Err("Foundation cannot be modified by governance");
+    } else if (g.HasGovOrFoundationAuth()) {
+        return Res::Ok();
+    }
+    return Res::Err("Invalid authentication");
+}
+
+Res AuthManager::CanSetGov(const std::vector<std::string> &keys) {
+    if (keys.empty()) {
+        return Res::Err("No keys to check");
+    }
+    for (const auto &key : keys) {
+        const auto res = ATTRIBUTES::ProcessVariable(key, std::nullopt, [&](const auto &attribute, const auto &) {
+            return CanSetGovInternal(*this, attribute);
+        });
+        if (!res) {
+            return res;
+        }
+    }
+    return Res::Ok();
+}
+
+Res AuthManager::CanSetGov(const ATTRIBUTES &var) {
+    const auto m = var.GetAttributesMap();
+    if (m.empty()) {
+        return Res::Err("No keys to check in attribute map");
+    }
+    for (const auto &[k, _] : m) {
+        if (const auto res = CanSetGovInternal(*this, k); !res) {
+            return res;
+        }
+    }
+    return Res::Ok();
+}
+
+Res AuthManager::HasGovOrFoundationAuth() {
+    if (HasFoundationAuth() || HasGovernanceAuth()) {
+        return Res::Ok();
+    }
+    return Res::Err("tx not from foundation member");
+}
+
+Res CCustomTxVisitor::HasFoundationAuth() const {
+    auto &mnview = blockCtx.GetView();
+
+    const auto members = GetFoundationMembers(mnview);
+    return HasAuthInner(txCtx, members);
+}
+
 Res CCustomTxVisitor::CheckCustomTx() const {
-    if (static_cast<int>(height) < consensus.DF10EunosPayaHeight) {
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    const auto &tx = txCtx.GetTransaction();
+    if (!IsRegtestNetwork() && static_cast<int>(height) < consensus.DF10EunosPayaHeight) {
         if (tx.vout.size() != 2) {
             return Res::Err("malformed tx vouts ((wrong number of vouts)");
         }
@@ -160,6 +232,8 @@ Res CCustomTxVisitor::CheckCustomTx() const {
 
 Res CCustomTxVisitor::TransferTokenBalance(DCT_ID id, CAmount amount, const CScript &from, const CScript &to) const {
     assert(!from.empty() || !to.empty());
+
+    auto &mnview = blockCtx.GetView();
 
     CTokenAmount tokenAmount{id, amount};
     // if "from" not supplied it will only add balance on "to" address
@@ -179,6 +253,8 @@ Res CCustomTxVisitor::TransferTokenBalance(DCT_ID id, CAmount amount, const CScr
 }
 
 ResVal<CBalances> CCustomTxVisitor::MintedTokens(uint32_t mintingOutputsStart) const {
+    const auto &tx = txCtx.GetTransaction();
+
     CBalances balances;
     for (uint32_t i = mintingOutputsStart; i < (uint32_t)tx.vout.size(); i++) {
         if (auto res = balances.Add(tx.vout[i].TokenAmount()); !res) {
@@ -189,6 +265,8 @@ ResVal<CBalances> CCustomTxVisitor::MintedTokens(uint32_t mintingOutputsStart) c
 }
 
 Res CCustomTxVisitor::SetShares(const CScript &owner, const TAmounts &balances) const {
+    const auto height = txCtx.GetHeight();
+    auto &mnview = blockCtx.GetView();
     for (const auto &balance : balances) {
         auto token = mnview.GetToken(balance.first);
         if (token && token->IsPoolShare()) {
@@ -204,6 +282,7 @@ Res CCustomTxVisitor::SetShares(const CScript &owner, const TAmounts &balances) 
 }
 
 Res CCustomTxVisitor::DelShares(const CScript &owner, const TAmounts &balances) const {
+    auto &mnview = blockCtx.GetView();
     for (const auto &kv : balances) {
         auto token = mnview.GetToken(kv.first);
         if (token && token->IsPoolShare()) {
@@ -220,12 +299,16 @@ Res CCustomTxVisitor::DelShares(const CScript &owner, const TAmounts &balances) 
 
 // we need proxy view to prevent add/sub balance record
 void CCustomTxVisitor::CalculateOwnerRewards(const CScript &owner) const {
+    const auto height = txCtx.GetHeight();
+    auto &mnview = blockCtx.GetView();
+
     CCustomCSView view(mnview);
     view.CalculateOwnerRewards(owner, height);
     view.Flush();
 }
 
 Res CCustomTxVisitor::SubBalanceDelShares(const CScript &owner, const CBalances &balance) const {
+    auto &mnview = blockCtx.GetView();
     CalculateOwnerRewards(owner);
     auto res = mnview.SubBalances(owner, balance);
     if (!res) {
@@ -235,6 +318,7 @@ Res CCustomTxVisitor::SubBalanceDelShares(const CScript &owner, const CBalances 
 }
 
 Res CCustomTxVisitor::AddBalanceSetShares(const CScript &owner, const CBalances &balance) const {
+    auto &mnview = blockCtx.GetView();
     CalculateOwnerRewards(owner);
     if (auto res = mnview.AddBalances(owner, balance); !res) {
         return res;
@@ -263,7 +347,11 @@ Res CCustomTxVisitor::SubBalancesDelShares(const CAccounts &accounts) const {
 Res CCustomTxVisitor::CollateralPctCheck(const bool hasDUSDLoans,
                                          const CVaultAssets &vaultAssets,
                                          const uint32_t ratio) const {
-    std::optional<std::pair<DCT_ID, std::optional<CTokensView::CTokenImpl> > > tokenDUSD;
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    auto &mnview = blockCtx.GetView();
+
+    std::optional<CTokensView::TokenIDPair> tokenDUSD;
     if (static_cast<int>(height) >= consensus.DF15FortCanningRoadHeight) {
         tokenDUSD = mnview.GetToken("DUSD");
     }
@@ -305,7 +393,7 @@ Res CCustomTxVisitor::CollateralPctCheck(const bool hasDUSDLoans,
     if (isPostNext) {
         const CDataStructureV0 enabledKey{AttributeTypes::Vaults, VaultIDs::DUSDVault, VaultKeys::DUSDVaultEnabled};
         auto attributes = mnview.GetAttributes();
-        assert(attributes);
+
         auto DUSDVaultsAllowed = attributes->GetValue(enabledKey, false);
         if (DUSDVaultsAllowed && hasDUSDColl && !hasOtherColl) {
             return Res::Ok();  // every loan ok when DUSD loops allowed and 100% DUSD collateral
@@ -362,6 +450,10 @@ ResVal<CVaultAssets> CCustomTxVisitor::CheckCollateralRatio(const CVaultId &vaul
                                                             const CBalances &collaterals,
                                                             bool useNextPrice,
                                                             bool requireLivePrice) const {
+    const auto height = txCtx.GetHeight();
+    const auto time = txCtx.GetTime();
+    auto &mnview = blockCtx.GetView();
+
     auto vaultAssets = mnview.GetVaultAssets(vaultId, collaterals, height, time, useNextPrice, requireLivePrice);
     if (!vaultAssets) {
         return vaultAssets;

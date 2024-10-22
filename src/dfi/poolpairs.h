@@ -123,6 +123,8 @@ struct CUpdatePoolPairMessage {
     CAmount commission;
     CScript ownerAddress;
     CBalances rewards;
+    std::string pairSymbol;
+    std::string pairName;
 
     ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
@@ -133,6 +135,10 @@ struct CUpdatePoolPairMessage {
         READWRITE(ownerAddress);
         if (!s.empty()) {
             READWRITE(rewards);
+        }
+        if (!s.empty()) {
+            READWRITE(pairSymbol);
+            READWRITE(pairName);
         }
     }
 };
@@ -219,6 +225,71 @@ struct PoolShareKey {
     }
 };
 
+struct TotalRewardPerShareKey {
+    uint32_t height;
+    uint32_t poolID;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream &s, Operation ser_action) {
+        READWRITE(WrapBigEndian(height));
+        READWRITE(WrapBigEndian(poolID));
+    }
+};
+
+struct TotalCommissionPerShareValue {
+    uint32_t tokenA;
+    uint32_t tokenB;
+    arith_uint256 commissionA;
+    arith_uint256 commissionB;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream &s, Operation ser_action) {
+        READWRITE(tokenA);
+        READWRITE(tokenB);
+        READWRITE(commissionA);
+        READWRITE(commissionB);
+    }
+};
+
+struct LoanTokenAverageLiquidityKey {
+    uint32_t sourceID;
+    uint32_t destID;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream &s, Operation ser_action) {
+        READWRITE(sourceID);
+        READWRITE(destID);
+    }
+
+    bool operator<(const LoanTokenAverageLiquidityKey &other) const {
+        if (sourceID == other.sourceID) {
+            return destID < other.destID;
+        }
+        return sourceID < other.sourceID;
+    }
+};
+
+struct LoanTokenLiquidityPerBlockKey {
+    uint32_t height;
+    uint32_t sourceID;
+    uint32_t destID;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream &s, Operation ser_action) {
+        READWRITE(WrapBigEndian(height));
+        READWRITE(sourceID);
+        READWRITE(destID);
+    }
+};
+
 struct PoolHeightKey {
     DCT_ID poolID;
     uint32_t height;
@@ -236,6 +307,21 @@ struct PoolHeightKey {
             uint32_t height_ = ~height;
             READWRITE(WrapBigEndian(height_));
         }
+    }
+};
+
+struct PoolSwapValue {
+    bool swapEvent;
+    CAmount blockCommissionA;
+    CAmount blockCommissionB;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream &s, Operation ser_action) {
+        READWRITE(swapEvent);
+        READWRITE(blockCommissionA);
+        READWRITE(blockCommissionB);
     }
 };
 
@@ -279,6 +365,12 @@ public:
                               uint32_t end,
                               std::function<void(RewardType, CTokenAmount, uint32_t)> onReward);
 
+    void CalculateStaticPoolRewards(std::function<CAmount()> onLiquidity,
+                                    std::function<void(RewardType, CTokenAmount, uint32_t)> onReward,
+                                    const uint32_t poolID,
+                                    const uint32_t beginHeight,
+                                    const uint32_t endHeight);
+
     Res SetLoanDailyReward(const uint32_t height, const CAmount reward);
     Res SetDailyReward(uint32_t height, CAmount reward);
     Res SetRewardPct(DCT_ID const &poolId, uint32_t height, CAmount rewardPct);
@@ -294,6 +386,30 @@ public:
         std::function<CTokenAmount(const CScript &, DCT_ID)> onGetBalance,
         std::function<Res(const CScript &, const CScript &, CTokenAmount)> onTransfer,
         int nHeight = 0);
+
+    bool SetLoanTokenLiquidityPerBlock(const LoanTokenLiquidityPerBlockKey &key, const CAmount liquidityPerBlock);
+    bool EraseTokenLiquidityPerBlock(const LoanTokenLiquidityPerBlockKey &key);
+    void ForEachTokenLiquidityPerBlock(
+        std::function<bool(const LoanTokenLiquidityPerBlockKey &key, const CAmount liquidityPerBlock)> callback,
+        const LoanTokenLiquidityPerBlockKey &start = LoanTokenLiquidityPerBlockKey{});
+
+    bool SetLoanTokenAverageLiquidity(const LoanTokenAverageLiquidityKey &key, const uint64_t liquidity);
+    std::optional<uint64_t> GetLoanTokenAverageLiquidity(const LoanTokenAverageLiquidityKey &key);
+    bool EraseTokenAverageLiquidity(const LoanTokenAverageLiquidityKey key);
+    void ForEachTokenAverageLiquidity(
+        std::function<bool(const LoanTokenAverageLiquidityKey &key, const uint64_t liquidity)> callback,
+        const LoanTokenAverageLiquidityKey start = LoanTokenAverageLiquidityKey{});
+
+    bool SetTotalRewardPerShare(const TotalRewardPerShareKey &key, const arith_uint256 &totalReward);
+    arith_uint256 GetTotalRewardPerShare(const TotalRewardPerShareKey &totalReward) const;
+    bool SetTotalLoanRewardPerShare(const TotalRewardPerShareKey &key, const arith_uint256 &totalReward);
+    arith_uint256 GetTotalLoanRewardPerShare(const TotalRewardPerShareKey &totalReward) const;
+    bool SetTotalCustomRewardPerShare(const TotalRewardPerShareKey &key,
+                                      const std::map<uint32_t, arith_uint256> &customRewards);
+    std::map<uint32_t, arith_uint256> GetTotalCustomRewardPerShare(const TotalRewardPerShareKey &key) const;
+    bool SetTotalCommissionPerShare(const TotalRewardPerShareKey &key,
+                                    const TotalCommissionPerShareValue &totalCommission);
+    TotalCommissionPerShareValue GetTotalCommissionPerShare(const TotalRewardPerShareKey &key) const;
 
     // tags
     struct ByID {
@@ -341,7 +457,37 @@ public:
     struct ByTokenDexFeePct {
         static constexpr uint8_t prefix() { return 'l'; }
     };
+    struct ByLoanTokenLiquidityPerBlock {
+        static constexpr uint8_t prefix() { return 'p'; }
+    };
+    struct ByLoanTokenLiquidityAverage {
+        static constexpr uint8_t prefix() { return 0x27; }
+    };
+    struct ByTotalRewardPerShare {
+        static constexpr uint8_t prefix() { return 0x28; }
+    };
+
+    struct ByTotalLoanRewardPerShare {
+        static constexpr uint8_t prefix() { return 0x29; }
+    };
+
+    struct ByTotalCustomRewardPerShare {
+        static constexpr uint8_t prefix() { return 0x2A; }
+    };
+
+    struct ByTotalCommissionPerShare {
+        static constexpr uint8_t prefix() { return 0x7B; }
+    };
 };
+
+template <typename By, typename ReturnType>
+ReturnType ReadValueAt(CPoolPairView *poolView, const PoolHeightKey &poolKey) {
+    auto it = poolView->LowerBound<By>(poolKey);
+    if (it.Valid() && it.Key().poolID == poolKey.poolID) {
+        return it.Value();
+    }
+    return {};
+}
 
 struct CLiquidityMessage {
     CAccounts from;  // from -> balances

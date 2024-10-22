@@ -63,12 +63,16 @@ CustomTxType CustomTxCodeToType(uint8_t ch) {
         case CustomTxType::FutureSwapExecution:
         case CustomTxType::FutureSwapRefund:
         case CustomTxType::TokenSplit:
+        case CustomTxType::TokenLock:
+        case CustomTxType::TokenLockRelease:
         case CustomTxType::Reject:
         case CustomTxType::CreateCfp:
         case CustomTxType::ProposalFeeRedistribution:
         case CustomTxType::Vote:
         case CustomTxType::CreateVoc:
         case CustomTxType::UnsetGovVariable:
+        case CustomTxType::UnsetGovHeightVariable:
+        case CustomTxType::ClearGovHeights:
         case CustomTxType::TransferDomain:
         case CustomTxType::EvmTx:
         case CustomTxType::None:
@@ -185,6 +189,10 @@ std::string ToString(CustomTxType type) {
             return "FutureSwapRefund";
         case CustomTxType::TokenSplit:
             return "TokenSplit";
+        case CustomTxType::TokenLock:
+            return "TokenLock";
+        case CustomTxType::TokenLockRelease:
+            return "TokenLockRelease";
         case CustomTxType::Reject:
             return "Reject";
         case CustomTxType::CreateCfp:
@@ -197,6 +205,10 @@ std::string ToString(CustomTxType type) {
             return "Vote";
         case CustomTxType::UnsetGovVariable:
             return "UnsetGovVariable";
+        case CustomTxType::UnsetGovHeightVariable:
+            return "UnsetGovHeightVariable";
+        case CustomTxType::ClearGovHeights:
+            return "ClearGovHeights";
         case CustomTxType::TransferDomain:
             return "TransferDomain";
         case CustomTxType::EvmTx:
@@ -273,8 +285,7 @@ CAmount GetNonMintedValueOut(const CTransaction &tx, DCT_ID tokenID) {
     return tx.GetValueOut(mintingOutputsStart, tokenID);
 }
 
-// it's disabled after Dakota height
-bool IsBelowDakotaMintTokenOrAccountToUtxos(CustomTxType txType, int height) {
+bool IsBelowDF6MintTokenOrAccountToUtxos(CustomTxType txType, int height) {
     return (height < Params().GetConsensus().DF6DakotaHeight &&
             (txType == CustomTxType::MintToken || txType == CustomTxType::AccountToUtxos));
 }

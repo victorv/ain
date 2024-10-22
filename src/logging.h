@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <mutex>
 #include <string>
@@ -25,6 +26,14 @@ static const bool DEFAULT_LOGTHREADNAMES = false;
 extern const char * const DEFAULT_DEBUGLOGFILE;
 
 extern bool fLogIPs;
+
+enum AutoPort : uint8_t {
+    RPC,
+    P2P,
+    ETHRPC,
+    WEBSOCKET,
+    OCEAN
+};
 
 struct CLogCategoryActive
 {
@@ -67,6 +76,9 @@ namespace BCLog {
         CUSTOMTXBENCH = (1ull << 30ull),
         CONNECT       = (1ull << 31ull),
         SIGN          = (1ull << 32ull),
+        SWAPRESULT    = (1ull << 33ull),
+        OCEAN         = (1ull << 34ull),
+        ICXBUG        = (1ull << 35ull),
         ALL           = ~(0ull),
     };
 
@@ -198,7 +210,7 @@ static inline void LogPrintCategoryOrThreadThrottled(const BCLog::LogFlags& cate
                 LogPrintf(args...);
                 it->second = current_time;
             }
-        }        
+        }
         else {
             // No entry yet -> log directly and save timestamp
             last_log_timestamps.insert(std::make_pair(message_key, current_time));
@@ -206,5 +218,9 @@ static inline void LogPrintCategoryOrThreadThrottled(const BCLog::LogFlags& cate
         }
     }
 }
+
+uint16_t GetPortFromLockFile(const AutoPort type);
+void SetPortToLockFile(const AutoPort portType, const uint16_t portNumber);
+void RemovePortUsage();
 
 #endif // DEFI_LOGGING_H

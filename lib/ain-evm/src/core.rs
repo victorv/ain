@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    num::NonZeroUsize,
     path::PathBuf,
     sync::Arc,
 };
@@ -11,194 +10,83 @@ use ain_contracts::{
     FixedContract,
 };
 use anyhow::format_err;
-use ethereum::{
-    AccessList, Account, Block, EnvelopedEncodable, Log, PartialHeader, TransactionAction,
-    TransactionV2,
-};
+use ethereum::{AccessList, Account, Block, Log, PartialHeader, TransactionAction, TransactionV2};
 use ethereum_types::{Bloom, BloomInput, H160, H256, U256};
-use log::{debug, trace};
-use lru::LruCache;
+use log::{info, trace};
 use parking_lot::Mutex;
-use vsdb_core::vsdb_set_base_dir;
 
 use crate::{
-    backend::{BackendError, EVMBackend, Vicinity},
+    backend::{BackendError, EVMBackend, Overlay, Vicinity},
     block::INITIAL_BASE_FEE,
-    blocktemplate::BlockTemplateMap,
+    blocktemplate::BlockTemplate,
     executor::{AinExecutor, ExecutorContext, TxResponse},
     fee::calculate_max_prepay_gas_fee,
     gas::check_tx_intrinsic_gas,
     receipt::ReceiptService,
     storage::{traits::BlockStorage, Storage},
-    transaction::SignedTx,
-    trie::TrieDBStore,
+    transaction::cache::{TransactionCache, ValidateTxInfo},
+    trie::{TrieDBStore, GENESIS_STATE_ROOT},
     weiamount::{try_from_satoshi, WeiAmount},
     Result,
 };
 
-pub type XHash = String;
-
-pub struct SignedTxCache {
-    inner: spin::Mutex<LruCache<String, SignedTx>>,
-}
-
-const DEFAULT_CACHE_SIZE: usize = 10000;
-
-impl Default for SignedTxCache {
-    fn default() -> Self {
-        Self::new(DEFAULT_CACHE_SIZE)
-    }
-}
-
-impl SignedTxCache {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            inner: spin::Mutex::new(LruCache::new(NonZeroUsize::new(capacity).unwrap())),
-        }
-    }
-
-    pub fn try_get_or_create(&self, key: &str) -> Result<SignedTx> {
-        let mut guard = self.inner.lock();
-        debug!("[signed-tx-cache]::get: {}", key);
-        let res = guard.try_get_or_insert(key.to_string(), || {
-            debug!("[signed-tx-cache]::create {}", key);
-            SignedTx::try_from(key)
-        })?;
-        Ok(res.clone())
-    }
-
-    pub fn try_get_or_create_from_tx(&self, tx: &TransactionV2) -> Result<SignedTx> {
-        let data = EnvelopedEncodable::encode(tx);
-        let key = hex::encode(&data);
-        let mut guard = self.inner.lock();
-        debug!("[signed-tx-cache]::get from tx: {}", &key);
-        let res = guard.try_get_or_insert(key.clone(), || {
-            debug!("[signed-tx-cache]::create from tx {}", &key);
-            SignedTx::try_from(key.as_str())
-        })?;
-        Ok(res.clone())
-    }
-}
-
-struct TxValidationCache {
-    validated: spin::Mutex<LruCache<(H256, String), ValidateTxInfo>>,
-    stateless: spin::Mutex<LruCache<String, ValidateTxInfo>>,
-}
-
-impl Default for TxValidationCache {
-    fn default() -> Self {
-        Self::new(DEFAULT_CACHE_SIZE)
-    }
-}
-
-impl TxValidationCache {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            validated: spin::Mutex::new(LruCache::new(NonZeroUsize::new(capacity).unwrap())),
-            stateless: spin::Mutex::new(LruCache::new(NonZeroUsize::new(capacity).unwrap())),
-        }
-    }
-
-    pub fn get(&self, key: &(H256, String)) -> Option<ValidateTxInfo> {
-        self.validated.lock().get(key).cloned()
-    }
-
-    pub fn get_stateless(&self, key: &str) -> Option<ValidateTxInfo> {
-        self.stateless.lock().get(key).cloned()
-    }
-
-    pub fn set(&self, key: (H256, String), value: ValidateTxInfo) -> ValidateTxInfo {
-        let mut cache = self.validated.lock();
-        cache.put(key, value.clone());
-        value
-    }
-
-    pub fn set_stateless(&self, key: String, value: ValidateTxInfo) -> ValidateTxInfo {
-        let mut cache = self.stateless.lock();
-        cache.put(key, value.clone());
-        value
-    }
-
-    // To be used on new block or any known state changes. Only clears fully validated TX cache.
-    // Stateless cache can be kept across blocks and is handled by LRU itself
-    pub fn clear(&self) {
-        let mut cache = self.validated.lock();
-        cache.clear()
-    }
-}
+pub type XHash = [u8; 32];
+pub type XAddress = [u8; 20];
 
 pub struct EVMCoreService {
-    pub block_templates: Arc<BlockTemplateMap>,
     pub trie_store: Arc<TrieDBStore>,
-    pub signed_tx_cache: SignedTxCache,
     storage: Arc<Storage>,
+    pub tx_cache: Arc<TransactionCache>,
     nonce_store: Mutex<HashMap<H160, BTreeSet<U256>>>,
-    tx_validation_cache: TxValidationCache,
 }
+
 pub struct EthCallArgs<'a> {
-    pub caller: Option<H160>,
+    pub caller: H160,
     pub to: Option<H160>,
     pub value: U256,
     pub data: &'a [u8],
     pub gas_limit: u64,
-    pub gas_price: Option<U256>,
-    pub max_fee_per_gas: Option<U256>,
+    pub gas_price: U256,
     pub access_list: AccessList,
     pub block_number: U256,
-    pub transaction_type: Option<U256>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ValidateTxInfo {
-    pub signed_tx: SignedTx,
-    pub max_prepay_fee: U256,
 }
 
 pub struct TransferDomainTxInfo {
-    pub from: String,
-    pub to: String,
+    pub from: XAddress,
+    pub to: XAddress,
     pub native_address: String,
     pub direction: bool,
     pub value: u64,
     pub token_id: u32,
 }
 
-fn init_vsdb(path: PathBuf) {
-    debug!(target: "vsdb", "Initializating VSDB");
-    let vsdb_dir_path = path.join(".vsdb");
-    vsdb_set_base_dir(&vsdb_dir_path).expect("Could not update vsdb base dir");
-    debug!(target: "vsdb", "VSDB directory : {}", vsdb_dir_path.display());
-}
-
 impl EVMCoreService {
-    pub fn restore(storage: Arc<Storage>, path: PathBuf) -> Self {
-        init_vsdb(path);
-
+    pub fn restore(
+        trie_store: Arc<TrieDBStore>,
+        storage: Arc<Storage>,
+        tx_cache: Arc<TransactionCache>,
+    ) -> Self {
         Self {
-            block_templates: Arc::new(BlockTemplateMap::new()),
-            trie_store: Arc::new(TrieDBStore::restore()),
-            signed_tx_cache: SignedTxCache::default(),
+            trie_store,
             storage,
+            tx_cache,
             nonce_store: Mutex::new(HashMap::new()),
-            tx_validation_cache: TxValidationCache::default(),
         }
     }
 
     pub fn new_from_json(
+        trie_store: Arc<TrieDBStore>,
         storage: Arc<Storage>,
+        tx_cache: Arc<TransactionCache>,
         genesis_path: PathBuf,
-        evm_datadir: PathBuf,
     ) -> Result<Self> {
-        debug!("Loading genesis state from {}", genesis_path.display());
-        init_vsdb(evm_datadir);
+        info!("Loading genesis state from {}", genesis_path.display());
 
         let handler = Self {
-            block_templates: Arc::new(BlockTemplateMap::new()),
-            trie_store: Arc::new(TrieDBStore::new()),
-            signed_tx_cache: SignedTxCache::default(),
+            trie_store: Arc::clone(&trie_store),
             storage: Arc::clone(&storage),
+            tx_cache: Arc::clone(&tx_cache),
             nonce_store: Mutex::new(HashMap::new()),
-            tx_validation_cache: TxValidationCache::default(),
         };
         let (state_root, genesis) = TrieDBStore::genesis_state_root_from_json(
             &handler.trie_store,
@@ -206,7 +94,7 @@ impl EVMCoreService {
             genesis_path,
         )?;
 
-        let gas_limit = storage.get_attributes_or_default()?.block_gas_limit;
+        let gas_limit = ain_cpp_imports::get_attribute_values(None).block_gas_limit;
         let block: Block<TransactionV2> = Block::new(
             PartialHeader {
                 state_root,
@@ -236,85 +124,10 @@ impl EVMCoreService {
     pub fn flush(&self) -> Result<()> {
         self.trie_store.flush()
     }
+}
 
-    pub fn call(&self, arguments: EthCallArgs) -> Result<TxResponse> {
-        let EthCallArgs {
-            caller,
-            to,
-            value,
-            data,
-            gas_limit,
-            gas_price,
-            max_fee_per_gas,
-            access_list,
-            block_number,
-            transaction_type,
-        } = arguments;
-
-        let (
-            state_root,
-            block_number,
-            beneficiary,
-            base_fee,
-            timestamp,
-            block_difficulty,
-            block_gas_limit,
-        ) = self
-            .storage
-            .get_block_by_number(&block_number)?
-            .map(|block| {
-                (
-                    block.header.state_root,
-                    block.header.number,
-                    block.header.beneficiary,
-                    block.header.base_fee,
-                    block.header.timestamp,
-                    block.header.difficulty,
-                    block.header.gas_limit,
-                )
-            })
-            .unwrap_or_default();
-        debug!(
-            "Calling EVM at block number : {:#x}, state_root : {:#x}",
-            block_number, state_root
-        );
-        debug!("[call] caller: {:?}", caller);
-        let vicinity = Vicinity {
-            gas_price: if transaction_type == Some(U256::from(2)) {
-                max_fee_per_gas.unwrap_or_default()
-            } else {
-                gas_price.unwrap_or_default()
-            },
-            origin: caller.unwrap_or_default(),
-            beneficiary,
-            block_number,
-            timestamp: U256::from(timestamp),
-            total_gas_used: U256::zero(),
-            block_difficulty,
-            block_gas_limit,
-            block_base_fee_per_gas: base_fee,
-            block_randomness: None,
-        };
-        debug!("[call] vicinity: {:?}", vicinity);
-
-        let mut backend = EVMBackend::from_root(
-            state_root,
-            Arc::clone(&self.trie_store),
-            Arc::clone(&self.storage),
-            vicinity,
-        )
-        .map_err(|e| format_err!("------ Could not restore backend {}", e))?;
-
-        Ok(AinExecutor::new(&mut backend).call(ExecutorContext {
-            caller: caller.unwrap_or_default(),
-            to,
-            value,
-            data,
-            gas_limit,
-            access_list,
-        }))
-    }
-
+// EVM Tx validation methods
+impl EVMCoreService {
     /// Validates a raw tx.
     ///
     /// The validation checks of the tx before we consider it to be valid are:
@@ -328,7 +141,7 @@ impl EVMCoreService {
     /// # Arguments
     ///
     /// * `tx` - The raw tx.
-    /// * `template_id` - The template_id template number.
+    /// * `template` - The EVM BlockTemplate.
     ///
     /// # Returns
     ///
@@ -339,33 +152,26 @@ impl EVMCoreService {
     /// Result cannot be used safety unless cs_main lock is taken on C++ side
     /// across all usages. Note: To be replaced with a proper lock flow later.
     ///
-    pub unsafe fn validate_raw_tx(&self, tx: &str, template_id: u64) -> Result<ValidateTxInfo> {
-        let state_root = self.block_templates.get_latest_state_root_in(template_id)?;
-        debug!("[validate_raw_tx] state_root : {:#?}", state_root);
-
-        if let Some(tx_info) = self
-            .tx_validation_cache
-            .get(&(state_root, String::from(tx)))
-        {
-            return Ok(tx_info);
-        }
-
-        debug!("[validate_raw_tx] template_id {}", template_id);
-        debug!("[validate_raw_tx] raw transaction : {:#?}", tx);
+    pub unsafe fn validate_raw_tx(
+        &self,
+        tx: &str,
+        template: &BlockTemplate,
+    ) -> Result<ValidateTxInfo> {
+        trace!("[validate_raw_tx] raw transaction : {:#?}", tx);
 
         let ValidateTxInfo {
             signed_tx,
             max_prepay_fee,
-        } = if let Some(validate_info) = self.tx_validation_cache.get_stateless(tx) {
+        } = if let Some(validate_info) = self.tx_cache.get_stateless(tx) {
             validate_info
         } else {
             let signed_tx = self
-                .signed_tx_cache
+                .tx_cache
                 .try_get_or_create(tx)
                 .map_err(|_| format_err!("Error: decoding raw tx to TransactionV2"))?;
-            debug!("[validate_raw_tx] signed_tx : {:#?}", signed_tx);
+            trace!("[validate_raw_tx] signed_tx : {:#?}", signed_tx);
 
-            debug!(
+            trace!(
                 "[validate_raw_tx] signed_tx.sender : {:#?}",
                 signed_tx.sender
             );
@@ -373,7 +179,7 @@ impl EVMCoreService {
             // Validate tx gas price with initial block base fee
             let tx_gas_price = signed_tx.gas_price();
             if tx_gas_price < INITIAL_BASE_FEE {
-                debug!("[validate_raw_tx] tx gas price is lower than initial block base fee");
+                trace!("[validate_raw_tx] tx gas price is lower than initial block base fee");
                 return Err(
                     format_err!("tx gas price is lower than initial block base fee").into(),
                 );
@@ -381,25 +187,17 @@ impl EVMCoreService {
 
             // Validate tx gas price and tx value within money range
             if !WeiAmount(tx_gas_price).wei_range() || !WeiAmount(signed_tx.value()).wei_range() {
-                debug!("[validate_raw_tx] value more than money range");
+                trace!("[validate_raw_tx] value more than money range");
                 return Err(format_err!("value more than money range").into());
             }
 
             // Validate tx gas limit with intrinsic gas
             check_tx_intrinsic_gas(&signed_tx)?;
 
-            // Validate gas limit
-            let gas_limit = signed_tx.gas_limit();
-            let block_gas_limit = self.storage.get_attributes_or_default()?.block_gas_limit;
-            if gas_limit > U256::from(block_gas_limit) {
-                debug!("[validate_raw_tx] gas limit higher than max_gas_per_block");
-                return Err(format_err!("gas limit higher than max_gas_per_block").into());
-            }
-
             let max_prepay_fee = calculate_max_prepay_gas_fee(&signed_tx)?;
-            debug!("[validate_raw_tx] max_prepay_fee : {:x?}", max_prepay_fee);
+            trace!("[validate_raw_tx] max_prepay_fee : {:x?}", max_prepay_fee);
 
-            self.tx_validation_cache.set_stateless(
+            self.tx_cache.set_stateless(
                 String::from(tx),
                 ValidateTxInfo {
                     signed_tx,
@@ -408,22 +206,30 @@ impl EVMCoreService {
             )
         };
 
+        // Validate gas limit
+        let gas_limit = signed_tx.gas_limit();
+        let block_gas_limit = template.ctx.attrs.block_gas_limit;
+        if gas_limit > U256::from(block_gas_limit) {
+            trace!("[validate_raw_tx] gas limit higher than max_gas_per_block");
+            return Err(format_err!("gas limit higher than max_gas_per_block").into());
+        }
+
         // Start of stateful checks
         // Validate tx prepay fees with account balance
-        let backend = self.get_backend(state_root)?;
+        let backend = &template.backend;
         let balance = backend.get_balance(&signed_tx.sender);
-        debug!("[validate_raw_tx] Account balance : {:x?}", balance);
+        trace!("[validate_raw_tx] Account balance : {:x?}", balance);
         if balance < max_prepay_fee {
-            debug!("[validate_raw_tx] insufficient balance to pay fees");
+            trace!("[validate_raw_tx] insufficient balance to pay fees");
             return Err(format_err!("insufficient balance to pay fees").into());
         }
 
         let nonce = backend.get_nonce(&signed_tx.sender);
-        debug!(
+        trace!(
             "[validate_raw_tx] signed_tx nonce : {:#?}",
             signed_tx.nonce()
         );
-        debug!("[validate_raw_tx] nonce : {:#?}", nonce);
+        trace!("[validate_raw_tx] nonce : {:#?}", nonce);
         // Validate tx nonce with account nonce
         if nonce > signed_tx.nonce() {
             return Err(format_err!(
@@ -434,13 +240,10 @@ impl EVMCoreService {
             .into());
         }
 
-        Ok(self.tx_validation_cache.set(
-            (state_root, String::from(tx)),
-            ValidateTxInfo {
-                signed_tx,
-                max_prepay_fee,
-            },
-        ))
+        Ok(ValidateTxInfo {
+            signed_tx,
+            max_prepay_fee,
+        })
     }
 
     /// Validates a raw transfer domain tx.
@@ -473,7 +276,7 @@ impl EVMCoreService {
     /// # Arguments
     ///
     /// * `tx` - The raw tx.
-    /// * `template_id` - The template_id template number.
+    /// * `template` - The EVM BlockTemplate.
     ///
     /// # Returns
     ///
@@ -487,35 +290,25 @@ impl EVMCoreService {
     pub unsafe fn validate_raw_transferdomain_tx(
         &self,
         tx: &str,
-        template_id: u64,
+        template: &BlockTemplate,
         context: TransferDomainTxInfo,
     ) -> Result<ValidateTxInfo> {
-        debug!(
-            "[validate_raw_transferdomain_tx] template_id {}",
-            template_id
-        );
-        debug!(
+        trace!(
             "[validate_raw_transferdomain_tx] raw transaction : {:#?}",
             tx
-        );
-
-        let state_root = self.block_templates.get_latest_state_root_in(template_id)?;
-        debug!(
-            "[validate_raw_transferdomain_tx] state_root : {:#?}",
-            state_root
         );
 
         let ValidateTxInfo {
             signed_tx,
             max_prepay_fee,
-        } = if let Some(validate_info) = self.tx_validation_cache.get_stateless(tx) {
+        } = if let Some(validate_info) = self.tx_cache.get_stateless(tx) {
             validate_info
         } else {
             let signed_tx = self
-                .signed_tx_cache
+                .tx_cache
                 .try_get_or_create(tx)
                 .map_err(|_| format_err!("Error: decoding raw tx to TransactionV2"))?;
-            debug!(
+            trace!(
                 "[validate_raw_transferdomain_tx] signed_tx : {:#?}",
                 signed_tx
             );
@@ -530,10 +323,7 @@ impl EVMCoreService {
             }
 
             // Validate tx sender with transferdomain sender
-            let sender = context
-                .from
-                .parse::<H160>()
-                .map_err(|_| "Invalid address")?;
+            let sender = H160::from(context.from);
             if signed_tx.sender != sender {
                 return Err(format_err!(
                     "[validate_raw_transferdomain_tx] invalid sender, signed_tx.sender : {:#?}, transferdomain sender : {:#?}",
@@ -544,19 +334,19 @@ impl EVMCoreService {
 
             // Validate tx value equal to zero
             if signed_tx.value() != U256::zero() {
-                debug!("[validate_raw_transferdomain_tx] value not equal to zero");
+                trace!("[validate_raw_transferdomain_tx] value not equal to zero");
                 return Err(format_err!("value not equal to zero").into());
             }
 
             // Validate tx gas price equal to zero
             if signed_tx.gas_price() != U256::zero() {
-                debug!("[validate_raw_transferdomain_tx] gas price not equal to zero");
+                trace!("[validate_raw_transferdomain_tx] gas price not equal to zero");
                 return Err(format_err!("gas price not equal to zero").into());
             }
 
             // Validate tx gas limit equal to zero
             if signed_tx.gas_limit() != U256::zero() {
-                debug!("[validate_raw_transferdomain_tx] gas limit not equal to zero");
+                trace!("[validate_raw_transferdomain_tx] gas limit not equal to zero");
                 return Err(format_err!("gas limit not equal to zero").into());
             }
 
@@ -583,17 +373,11 @@ impl EVMCoreService {
 
             let (from_address, to_address) = if context.direction {
                 // EvmIn
-                let to_address = context
-                    .to
-                    .parse::<H160>()
-                    .map_err(|_| "failed to parse to address")?;
+                let to_address = H160::from(context.to);
                 (fixed_address, to_address)
             } else {
                 // EvmOut
-                let from_address = context
-                    .from
-                    .parse::<H160>()
-                    .map_err(|_| "failed to parse from address")?;
+                let from_address = H160::from(context.from);
                 (from_address, fixed_address)
             };
             let value = try_from_satoshi(U256::from(context.value))?.0;
@@ -699,18 +483,18 @@ impl EVMCoreService {
             }
         };
 
-        let backend = self.get_backend(state_root)?;
+        let backend = &template.backend;
 
         let nonce = backend.get_nonce(&signed_tx.sender);
-        debug!(
+        trace!(
             "[validate_raw_transferdomain_tx] signed_tx.sender : {:#?}",
             signed_tx.sender
         );
-        debug!(
+        trace!(
             "[validate_raw_transferdomain_tx] signed_tx nonce : {:#?}",
             signed_tx.nonce()
         );
-        debug!("[validate_raw_transferdomain_tx] nonce : {:#?}", nonce);
+        trace!("[validate_raw_transferdomain_tx] nonce : {:#?}", nonce);
 
         // Validate tx nonce
         if nonce > signed_tx.nonce() {
@@ -746,31 +530,19 @@ impl EVMCoreService {
     /// Result cannot be used safety unless `cs_main` lock is taken on C++ side
     /// across all usages. Note: To be replaced with a proper lock flow later.
     ///
-    pub unsafe fn remove_block_template(&self, template_id: u64) {
-        self.block_templates.remove(template_id);
-    }
-
-    ///
-    /// # Safety
-    ///
-    /// Result cannot be used safety unless `cs_main` lock is taken on C++ side
-    /// across all usages. Note: To be replaced with a proper lock flow later.
-    ///
     pub unsafe fn remove_txs_above_hash_in_block_template(
         &self,
-        template_id: u64,
+        template: &mut BlockTemplate,
         target_hash: XHash,
     ) -> Result<Vec<XHash>> {
-        let hashes = self
-            .block_templates
-            .remove_txs_above_hash_in(template_id, target_hash)?;
+        let hashes = template.remove_txs_above_hash(target_hash)?;
         Ok(hashes)
     }
 
     /// Retrieves the next valid nonce for the specified account within a particular block template.
     /// # Arguments
     ///
-    /// * `template_id` - The template_id template number.
+    /// * `template` - The EVM BlockTemplate.
     /// * `address` - The EVM address of the account whose nonce we want to retrieve.
     ///
     /// # Returns
@@ -784,63 +556,40 @@ impl EVMCoreService {
     ///
     pub unsafe fn get_next_valid_nonce_in_block_template(
         &self,
-        template_id: u64,
+        template: &BlockTemplate,
         address: H160,
     ) -> Result<U256> {
-        let state_root = self.block_templates.get_latest_state_root_in(template_id)?;
-        let backend = self.get_backend(state_root)?;
-        let nonce = backend.get_nonce(&address);
-        trace!(
-            "[get_next_valid_nonce_in_block_template] Account {address:x?} nonce {nonce:x?} in template_id {template_id}"
-        );
+        let nonce = template.backend.get_nonce(&address);
+        trace!("[get_next_valid_nonce_in_block_template] Account {address:x?} nonce {nonce:x?}");
         Ok(nonce)
     }
 }
 
 // State methods
 impl EVMCoreService {
-    pub fn get_state_root(&self) -> Result<H256> {
+    pub fn get_latest_state_root(&self) -> Result<H256> {
         let state_root = self
             .storage
             .get_latest_block()?
             .map_or(H256::default(), |block| block.header.state_root);
         Ok(state_root)
     }
-    pub fn get_account(&self, address: H160, block_number: U256) -> Result<Option<Account>> {
-        let state_root = self
-            .storage
-            .get_block_by_number(&block_number)?
-            .map(|block| block.header.state_root)
-            .ok_or(format_err!(
-                "[get_account] Block number {:x?} not found",
-                block_number
-            ))?;
 
+    pub fn get_account(&self, address: H160, state_root: H256) -> Result<Option<Account>> {
         let backend = EVMBackend::from_root(
             state_root,
             Arc::clone(&self.trie_store),
             Arc::clone(&self.storage),
             Vicinity::default(),
+            None,
         )?;
         Ok(backend.get_account(&address))
     }
 
-    pub fn get_latest_contract_storage(&self, contract: H160, storage_index: H256) -> Result<U256> {
-        let state_root = self.get_state_root()?;
-        let backend = EVMBackend::from_root(
-            state_root,
-            Arc::clone(&self.trie_store),
-            Arc::clone(&self.storage),
-            Vicinity::default(),
-        )?;
-
-        backend.get_contract_storage(contract, storage_index.as_bytes())
-    }
-
-    pub fn get_code(&self, address: H160, block_number: U256) -> Result<Option<Vec<u8>>> {
-        self.get_account(address, block_number)?
+    pub fn get_code(&self, address: H160, state_root: H256) -> Result<Option<Vec<u8>>> {
+        self.get_account(address, state_root)?
             .map_or(Ok(None), |account| {
-                self.storage.get_code_by_hash(account.code_hash)
+                self.storage.get_code_by_hash(address, account.code_hash)
             })
     }
 
@@ -848,70 +597,63 @@ impl EVMCoreService {
         &self,
         address: H160,
         position: U256,
-        block_number: U256,
+        state_root: H256,
     ) -> Result<Option<Vec<u8>>> {
-        self.get_account(address, block_number)?
+        self.get_account(address, state_root)?
             .map_or(Ok(None), |account| {
                 let storage_trie = self
                     .trie_store
                     .trie_db
                     .trie_restore(address.as_bytes(), None, account.storage_root.into())
-                    .unwrap();
+                    .map_err(|e| BackendError::TrieRestoreFailed(e.to_string()).into());
 
                 let tmp: &mut [u8; 32] = &mut [0; 32];
                 position.to_big_endian(tmp);
-                storage_trie
-                    .get(tmp.as_slice())
-                    .map_err(|e| BackendError::TrieError(e.to_string()).into())
+                storage_trie.and_then(|storage| {
+                    storage
+                        .get(tmp.as_slice())
+                        .map_err(|e| BackendError::TrieError(e.to_string()).into())
+                })
             })
     }
 
-    pub fn get_balance(&self, address: H160, block_number: U256) -> Result<U256> {
+    pub fn get_balance(&self, address: H160, state_root: H256) -> Result<U256> {
         let balance = self
-            .get_account(address, block_number)?
+            .get_account(address, state_root)?
             .map_or(U256::zero(), |account| account.balance);
 
-        debug!("Account {:x?} balance {:x?}", address, balance);
+        trace!("Account {:x?} balance {:x?}", address, balance);
         Ok(balance)
     }
 
-    pub fn get_nonce_from_block_number(&self, address: H160, block_number: U256) -> Result<U256> {
-        let nonce = self
-            .get_account(address, block_number)?
-            .map_or(U256::zero(), |account| account.nonce);
-
-        debug!("Account {:x?} nonce {:x?}", address, nonce);
-        Ok(nonce)
-    }
-
-    pub fn get_nonce_from_state_root(&self, address: H160, state_root: H256) -> Result<U256> {
+    pub fn get_nonce(&self, address: H160, state_root: H256) -> Result<U256> {
         let backend = self.get_backend(state_root)?;
         let nonce = backend.get_nonce(&address);
         Ok(nonce)
     }
 
     pub fn get_latest_block_backend(&self) -> Result<EVMBackend> {
-        let (state_root, block_number) = self
+        let block_header = self
             .storage
             .get_latest_block()?
-            .map(|block| (block.header.state_root, block.header.number))
-            .unwrap_or_default();
-
+            .map(|block| block.header)
+            .ok_or(format_err!(
+                "[get_latest_block_backend] Latest block not found",
+            ))?;
+        let state_root = block_header.state_root;
         trace!(
             "[get_latest_block_backend] At block number : {:#x}, state_root : {:#x}",
-            block_number,
-            state_root
+            block_header.number,
+            state_root,
         );
+
+        let vicinity = Vicinity::from(block_header);
         EVMBackend::from_root(
             state_root,
             Arc::clone(&self.trie_store),
             Arc::clone(&self.storage),
-            Vicinity {
-                block_gas_limit: U256::from(
-                    self.storage.get_attributes_or_default()?.block_gas_limit,
-                ),
-                ..Vicinity::default()
-            },
+            vicinity,
+            None,
         )
     }
 
@@ -925,15 +667,66 @@ impl EVMCoreService {
             Arc::clone(&self.storage),
             Vicinity {
                 block_gas_limit: U256::from(
-                    self.storage.get_attributes_or_default()?.block_gas_limit,
+                    ain_cpp_imports::get_attribute_values(None).block_gas_limit,
                 ),
                 ..Vicinity::default()
             },
+            None,
+        )
+    }
+
+    pub fn get_backend_from_block(
+        &self,
+        block_number: Option<U256>,
+        caller: Option<H160>,
+        gas_price: Option<U256>,
+        overlay: Option<Overlay>,
+    ) -> Result<EVMBackend> {
+        let (state_root, vicinity) = if let Some(block_number) = block_number {
+            let block_header = self
+                .storage
+                .get_block_by_number(&block_number)?
+                .map(|block| block.header)
+                .ok_or(format_err!("Block number {:x?} not found", block_number))?;
+            let state_root = block_header.state_root;
+            trace!(
+                "Calling EVM at block number : {:#x}, state_root : {:#x}",
+                block_number,
+                state_root
+            );
+
+            let mut vicinity = Vicinity::from(block_header);
+            if let Some(gas_price) = gas_price {
+                vicinity.gas_price = gas_price;
+            }
+            if let Some(caller) = caller {
+                vicinity.origin = caller;
+            }
+            trace!("Vicinity: {:?}", vicinity);
+            (state_root, vicinity)
+        } else {
+            // Handle edge case of no genesis block
+            let block_gas_limit =
+                U256::from(ain_cpp_imports::get_attribute_values(None).block_gas_limit);
+            let vicinity: Vicinity = Vicinity {
+                block_number: U256::zero(),
+                block_gas_limit,
+                block_base_fee_per_gas: INITIAL_BASE_FEE,
+                ..Vicinity::default()
+            };
+            (GENESIS_STATE_ROOT, vicinity)
+        };
+        EVMBackend::from_root(
+            state_root,
+            Arc::clone(&self.trie_store),
+            Arc::clone(&self.storage),
+            vicinity,
+            overlay,
         )
     }
 
     pub fn get_next_account_nonce(&self, address: H160, state_root: H256) -> Result<U256> {
-        let state_root_nonce = self.get_nonce_from_state_root(address, state_root)?;
+        let state_root_nonce = self.get_nonce(address, state_root)?;
         let mut nonce_store = self.nonce_store.lock();
         match nonce_store.entry(address) {
             std::collections::hash_map::Entry::Vacant(_) => Ok(state_root_nonce),
@@ -980,8 +773,31 @@ impl EVMCoreService {
         let mut nonce_store = self.nonce_store.lock();
         nonce_store.clear()
     }
+}
 
-    pub fn clear_transaction_cache(&self) {
-        self.tx_validation_cache.clear()
+// RPC methods
+impl EVMCoreService {
+    pub fn call(&self, arguments: EthCallArgs, overlay: Option<Overlay>) -> Result<TxResponse> {
+        let EthCallArgs {
+            caller,
+            to,
+            value,
+            data,
+            gas_limit,
+            gas_price,
+            access_list,
+            block_number,
+        } = arguments;
+        let mut backend = self
+            .get_backend_from_block(Some(block_number), Some(caller), Some(gas_price), overlay)
+            .map_err(|e| format_err!("Could not restore backend {}", e))?;
+        Ok(AinExecutor::new(&mut backend).call(ExecutorContext {
+            caller,
+            to,
+            value,
+            data,
+            gas_limit,
+            access_list,
+        }))
     }
 }

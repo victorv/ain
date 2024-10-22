@@ -1,6 +1,7 @@
-#include <dfi/mn_rpc.h>
-
+#include <dfi/accountshistory.h>
 #include <dfi/govvariables/attributes.h>
+#include <dfi/mn_rpc.h>
+#include <dfi/vaulthistory.h>
 
 #include <index/txindex.h>
 
@@ -26,7 +27,8 @@ UniValue createtoken(const JSONRPCRequest &request) {
                     {"name",
                      RPCArg::Type::STR,
                      RPCArg::Optional::OMITTED,
-                     "Token's name (optional), no longer than " + std::to_string(CToken::MAX_TOKEN_NAME_LENGTH)},
+                     "Token's name (optional), no longer than " +
+                         std::to_string(CToken::POST_METACHAIN_TOKEN_NAME_BYTE_SIZE)},
                     {"isDAT",
                      RPCArg::Type::BOOL,
                      RPCArg::Optional::OMITTED,
@@ -113,6 +115,10 @@ UniValue createtoken(const JSONRPCRequest &request) {
     token.flags =
         metaObj["isDAT"].getBool() ? token.flags | (uint8_t)CToken::TokenFlags::DAT : token.flags;  // setting isDAT
 
+    if (token.name.empty()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Token name should not be empty");
+    }
+
     if (!metaObj["tradeable"].isNull()) {
         token.flags = metaObj["tradeable"].getBool() ? token.flags | uint8_t(CToken::TokenFlags::Tradeable)
                                                      : token.flags & ~uint8_t(CToken::TokenFlags::Tradeable);
@@ -133,15 +139,12 @@ UniValue createtoken(const JSONRPCRequest &request) {
     const auto txVersion = GetTransactionVersion(targetHeight);
     CMutableTransaction rawTx(txVersion);
 
+    auto [view, accountView, vaultView] = GetSnapshots();
     CTransactionRef optAuthTx;
     std::set<CScript> auths;
-    rawTx.vin = GetAuthInputsSmart(pwallet,
-                                   rawTx.nVersion,
-                                   auths,
-                                   metaObj["isDAT"].getBool(),
-                                   optAuthTx,
-                                   txInputs,
-                                   request.metadata.coinSelectOpts);
+    const auto isDAT = metaObj["isDAT"].getBool();
+    rawTx.vin = GetAuthInputsSmart(
+        pwallet, rawTx.nVersion, auths, isDAT, optAuthTx, txInputs, *view, request.metadata.coinSelectOpts, isDAT);
 
     rawTx.vout.push_back(CTxOut(GetTokenCreationFee(targetHeight), scriptMeta));
     rawTx.vout.push_back(CTxOut(GetTokenCollateralAmount(), GetScriptForDestination(collateralDest)));
@@ -207,15 +210,14 @@ UniValue updatetoken(const JSONRPCRequest &request) {
                      RPCArg::Type::BOOL,
                      RPCArg::Optional::OMITTED,
                      "Lock token properties forever (bool, optional)"},
-                    // it is possible to transfer token's owner. but later
-                    //                           {"collateralAddress", RPCArg::Type::STR, RPCArg::Optional::NO,
-                    //                            "Any valid destination for keeping collateral amount - used as token's
-                    //                            owner auth"},
-                    // omitted for now, need to research/discuss
-                    //                           {"decimal", RPCArg::Type::NUM, RPCArg::Optional::OMITTED,
-                    //                            "Token's decimal places (optional, fixed to 8 for now, unchecked)"},
-                    //                           {"limit", RPCArg::Type::NUM, RPCArg::Optional::OMITTED,
-                    //                            "Token's total supply limit (optional, zero for now, unchecked)"},
+                    {"deprecate",
+                     RPCArg::Type::BOOL,
+                     RPCArg::Optional::OMITTED,
+                     "Marks a token as deprecated and attaches end of life prefix to symbol (bool, optional)"},
+                    {"collateralAddress",
+                     RPCArg::Type::STR,
+                     RPCArg::Optional::OMITTED,
+                     "New collateral address to transfer token ownership to (string, optional)"},
                 },
             }, {
                 "inputs",
@@ -252,25 +254,27 @@ UniValue updatetoken(const JSONRPCRequest &request) {
 
     RPCTypeCheck(request.params, {UniValueType(), UniValue::VOBJ, UniValue::VARR}, true);  // first means "any"
 
-    /// @todo RPCTypeCheckObj or smth to help with option's names and old/new tx type
-
     const std::string tokenStr = trim_ws(request.params[0].getValStr());
+    if (tokenStr.empty()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Token name cannot be empty"));
+    }
+
     UniValue metaObj = request.params[1].get_obj();
     const UniValue &txInputs = request.params[2];
 
     CTokenImplementation tokenImpl;
-    CTxDestination ownerDest;
     CScript owner;
-    int targetHeight;
+
+    auto [view, accountView, vaultView] = GetSnapshots();
+    auto targetHeight = view->GetLastHeight() + 1;
+    DCT_ID id{};
     {
-        LOCK(cs_main);
-        DCT_ID id;
-        auto token = pcustomcsview->GetTokenGuessId(tokenStr, id);
-        if (id == DCT_ID{0}) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Can't alter DFI token!"));
-        }
+        auto token = view->GetTokenGuessId(tokenStr, id);
         if (!token) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Token %s does not exist!", tokenStr));
+        }
+        if (id == DCT_ID{0}) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Can't alter DFI token!"));
         }
         tokenImpl = static_cast<const CTokenImplementation &>(*token);
         if (tokenImpl.IsPoolShare()) {
@@ -278,14 +282,19 @@ UniValue updatetoken(const JSONRPCRequest &request) {
                                strprintf("Token %s is the LPS token! Can't alter pool share's tokens!", tokenStr));
         }
 
-        const Coin &authCoin =
-            ::ChainstateActive().CoinsTip().AccessCoin(COutPoint(tokenImpl.creationTx, 1));  // always n=1 output
-        if (!ExtractDestination(authCoin.out.scriptPubKey, ownerDest)) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER,
-                               strprintf("Can't extract destination for token's %s collateral", tokenImpl.symbol));
+        Coin authCoin;
+        if (targetHeight >= Params().GetConsensus().DF24Height) {
+            if (const auto txid = view->GetNewTokenCollateralTXID(id.v); txid != uint256{}) {
+                authCoin = ::ChainstateActive().CoinsTip().AccessCoin(COutPoint(txid, 1));
+            }
         }
+
+        // Check if Coin is null which is the same as spent
+        if (authCoin.IsSpent()) {
+            authCoin = ::ChainstateActive().CoinsTip().AccessCoin(COutPoint(tokenImpl.creationTx, 1));
+        }
+
         owner = authCoin.out.scriptPubKey;
-        targetHeight = ::ChainActive().Height() + 1;
     }
 
     if (!metaObj["symbol"].isNull()) {
@@ -310,49 +319,74 @@ UniValue updatetoken(const JSONRPCRequest &request) {
         tokenImpl.flags =
             metaObj["finalize"].getBool() ? tokenImpl.flags | (uint8_t)CToken::TokenFlags::Finalized : tokenImpl.flags;
     }
+    const auto isDeprecated = tokenImpl.IsDeprecated();
+    if (!metaObj["deprecate"].isNull()) {
+        tokenImpl.flags = metaObj["deprecate"].getBool() ? tokenImpl.flags | (uint8_t)CToken::TokenFlags::Deprecated
+                                                         : tokenImpl.flags & ~(uint8_t)CToken::TokenFlags::Deprecated;
+    }
+
+    bool newCollateralAddress{};
+    CTxDestination collateralDest;
+    if (!metaObj["collateralAddress"].isNull()) {
+        if (targetHeight < Params().GetConsensus().DF24Height) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Collateral address update is not allowed before DF24Height");
+        }
+        const auto collateralAddress = metaObj["collateralAddress"].getValStr();
+        collateralDest = DecodeDestination(collateralAddress);
+        if (!IsValidDestination(collateralDest)) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                               "recipient (" + collateralAddress + ") does not refer to any valid address");
+        }
+        newCollateralAddress = true;
+    }
 
     const auto txVersion = GetTransactionVersion(targetHeight);
     CMutableTransaction rawTx(txVersion);
     CTransactionRef optAuthTx;
     std::set<CScript> auths;
 
-    if (targetHeight < Params().GetConsensus().DF2BayfrontHeight) {
-        if (metaObj.size() > 1 || !metaObj.exists("isDAT")) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER,
-                               "Only 'isDAT' flag modification allowed before Bayfront fork (<" +
-                                   std::to_string(Params().GetConsensus().DF2BayfrontHeight) + ")");
-        }
+    bool isFoundersToken{};
+    if (targetHeight < Params().GetConsensus().DF24Height) {
+        const auto members = GetFoundationMembers(*view);
+        isFoundersToken =
+            !members.empty() ? members.count(owner) : Params().GetConsensus().foundationMembers.count(owner);
+    } else if (view->GetLoanTokenByID(id)) {
+        isFoundersToken = true;
+    }
 
-        // before DF2BayfrontHeight it needs only founders auth
+    if (isFoundersToken) {  // need any founder's auth
         rawTx.vin = GetAuthInputsSmart(
-            pwallet, rawTx.nVersion, auths, true, optAuthTx, txInputs, request.metadata.coinSelectOpts);
-    } else {  // post-bayfront auth
-        const auto attributes = pcustomcsview->GetAttributes();
-        assert(attributes);
-        std::set<CScript> databaseMembers;
-        if (attributes->GetValue(CDataStructureV0{AttributeTypes::Param, ParamIDs::Feature, DFIPKeys::GovFoundation},
-                                 false)) {
-            databaseMembers = attributes->GetValue(
-                CDataStructureV0{AttributeTypes::Param, ParamIDs::Foundation, DFIPKeys::Members}, std::set<CScript>{});
-        }
-        bool isFoundersToken = !databaseMembers.empty() ? databaseMembers.find(owner) != databaseMembers.end()
-                                                        : Params().GetConsensus().foundationMembers.find(owner) !=
-                                                              Params().GetConsensus().foundationMembers.end();
-
-        if (isFoundersToken) {  // need any founder's auth
-            rawTx.vin = GetAuthInputsSmart(
-                pwallet, rawTx.nVersion, auths, true, optAuthTx, txInputs, request.metadata.coinSelectOpts);
-        } else {  // "common" auth
+            pwallet, rawTx.nVersion, auths, true, optAuthTx, txInputs, *view, request.metadata.coinSelectOpts);
+    } else {  // "common" auth
+        try {
             auths.insert(owner);
             rawTx.vin = GetAuthInputsSmart(
-                pwallet, rawTx.nVersion, auths, false, optAuthTx, txInputs, request.metadata.coinSelectOpts);
+                pwallet, rawTx.nVersion, auths, false, optAuthTx, txInputs, *view, request.metadata.coinSelectOpts);
+        } catch (const UniValue &error) {
+            if (const auto foundationAuth = isDeprecated != tokenImpl.IsDeprecated()) {
+                auths.clear();
+                rawTx.vin = GetAuthInputsSmart(pwallet,
+                                               rawTx.nVersion,
+                                               auths,
+                                               foundationAuth,
+                                               optAuthTx,
+                                               txInputs,
+                                               *view,
+                                               request.metadata.coinSelectOpts,
+                                               foundationAuth);
+            } else {
+                throw JSONRPCError(error["code"].get_int(), error["message"].getValStr());
+            }
         }
     }
 
     CDataStream metadata(DfTxMarker, SER_NETWORK, PROTOCOL_VERSION);
 
     // tx type and serialized data differ:
-    if (targetHeight < Params().GetConsensus().DF2BayfrontHeight) {
+    if (targetHeight >= Params().GetConsensus().DF24Height) {
+        metadata << static_cast<unsigned char>(CustomTxType::UpdateTokenAny) << tokenImpl.creationTx
+                 << static_cast<CToken>(tokenImpl) << newCollateralAddress;
+    } else if (targetHeight < Params().GetConsensus().DF2BayfrontHeight) {
         metadata << static_cast<unsigned char>(CustomTxType::UpdateToken) << tokenImpl.creationTx
                  << metaObj["isDAT"].getBool();
     } else {
@@ -364,6 +398,9 @@ UniValue updatetoken(const JSONRPCRequest &request) {
     scriptMeta << OP_RETURN << ToByteVector(metadata);
 
     rawTx.vout.push_back(CTxOut(0, scriptMeta));
+    if (newCollateralAddress) {
+        rawTx.vout.push_back(CTxOut(GetTokenCollateralAmount(), GetScriptForDestination(collateralDest)));
+    }
 
     CCoinControl coinControl;
 
@@ -396,13 +433,13 @@ UniValue tokenToJSON(CCustomCSView &view, DCT_ID const &id, const CTokenImplemen
         tokenObj.pushKV("isDAT", token.IsDAT());
         tokenObj.pushKV("isLPS", token.IsPoolShare());
         tokenObj.pushKV("finalized", token.IsFinalized());
+        // tokenObj.pushKV("deprecated", token.IsDeprecated());
         auto loanToken{token.IsLoanToken()};
         if (!loanToken) {
-            if (auto attributes = view.GetAttributes()) {
-                CDataStructureV0 mintingKey{AttributeTypes::Token, id.v, TokenKeys::LoanMintingEnabled};
-                CDataStructureV0 interestKey{AttributeTypes::Token, id.v, TokenKeys::LoanMintingInterest};
-                loanToken = attributes->GetValue(mintingKey, false) && attributes->CheckKey(interestKey);
-            }
+            auto attributes = view.GetAttributes();
+            CDataStructureV0 mintingKey{AttributeTypes::Token, id.v, TokenKeys::LoanMintingEnabled};
+            CDataStructureV0 interestKey{AttributeTypes::Token, id.v, TokenKeys::LoanMintingInterest};
+            loanToken = attributes->GetValue(mintingKey, false) && attributes->CheckKey(interestKey);
         }
         tokenObj.pushKV("isLoanToken", loanToken);
 
@@ -412,8 +449,12 @@ UniValue tokenToJSON(CCustomCSView &view, DCT_ID const &id, const CTokenImplemen
         tokenObj.pushKV("destructionTx", token.destructionTx.ToString());
         tokenObj.pushKV("destructionHeight", token.destructionHeight);
         if (!token.IsPoolShare()) {
+            auto collateralAuth = token.creationTx;
+            if (const auto txid = view.GetNewTokenCollateralTXID(id.v); txid != uint256{}) {
+                collateralAuth = txid;
+            }
             const Coin &authCoin =
-                ::ChainstateActive().CoinsTip().AccessCoin(COutPoint(token.creationTx, 1));  // always n=1 output
+                ::ChainstateActive().CoinsTip().AccessCoin(COutPoint(collateralAuth, 1));  // always n=1 output
             tokenObj.pushKV("collateralAddress", ScriptToString(authCoin.out.scriptPubKey));
         } else {
             tokenObj.pushKV("collateralAddress", "undefined");
@@ -495,12 +536,12 @@ UniValue listtokens(const JSONRPCRequest &request) {
         }
     }
 
-    LOCK(cs_main);
+    auto [view, accountView, vaultView] = GetSnapshots();
 
     UniValue ret(UniValue::VOBJ);
-    pcustomcsview->ForEachToken(
-        [&](DCT_ID const &id, CTokenImplementation token) {
-            ret.pushKVs(tokenToJSON(*pcustomcsview, id, token, verbose));
+    view->ForEachToken(
+        [&, &view = view](DCT_ID const &id, CTokenImplementation token) {
+            ret.pushKVs(tokenToJSON(*view, id, token, verbose));
 
             limit--;
             return limit != 0;
@@ -526,12 +567,12 @@ UniValue gettoken(const JSONRPCRequest &request) {
         return *res;
     }
 
-    LOCK(cs_main);
+    auto [view, accountView, vaultView] = GetSnapshots();
 
     DCT_ID id;
-    auto token = pcustomcsview->GetTokenGuessId(request.params[0].getValStr(), id);
+    auto token = view->GetTokenGuessId(request.params[0].getValStr(), id);
     if (token) {
-        auto res = tokenToJSON(*pcustomcsview, id, *token, true);
+        auto res = tokenToJSON(*view, id, *token, true);
         return GetRPCResultCache().Set(request, res);
     }
     throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Token not found");
@@ -621,22 +662,18 @@ UniValue getcustomtx(const JSONRPCRequest &request) {
         }
     }
 
-    int nHeight{0};
+    auto [view, accountView, vaultView] = GetSnapshots();
+    auto nHeight = view->GetLastHeight() + 1;
     bool actualHeight{false};
     CustomTxType guess;
     UniValue txResults(UniValue::VOBJ);
     Res res{};
 
     if (tx) {
-        LOCK(cs_main);
-
         // Found a block hash but no block index yet
         if (!hashBlock.IsNull() && !blockindex) {
             blockindex = LookupBlockIndex(hashBlock);
         }
-
-        // Default to next block height
-        nHeight = ::ChainActive().Height() + 1;
 
         // Get actual height if blockindex avaiable
         if (blockindex) {
@@ -649,7 +686,7 @@ UniValue getcustomtx(const JSONRPCRequest &request) {
             return "Coinbase transaction. Not a custom transaction.";
         }
 
-        res = RpcInfo(*tx, nHeight, guess, txResults);
+        res = RpcInfo(*view, *tx, nHeight, guess, txResults);
         if (guess == CustomTxType::None) {
             return "Not a custom transaction";
         }
@@ -664,24 +701,16 @@ UniValue getcustomtx(const JSONRPCRequest &request) {
     result.pushKV("type", ToString(guess));
     if (!actualHeight) {
         LOCK(cs_main);
-        CCustomCSView mnview(*pcustomcsview);
-        CCoinsViewCache view(&::ChainstateActive().CoinsTip());
+        BlockContext blockCtx(nHeight, ::ChainActive().Tip()->nTime, Params().GetConsensus());
+        CCoinsViewCache coins(&::ChainstateActive().CoinsTip());
 
-        const auto &consensus = Params().GetConsensus();
-        const auto isEvmEnabledForBlock = IsEVMEnabled(mnview, consensus);
+        auto txCtx = TransactionContext{
+            coins,
+            *tx,
+            blockCtx,
+        };
 
-        std::shared_ptr<CScopedTemplateID> evmTemplateId{};
-        auto res = ApplyCustomTx(mnview,
-                                 view,
-                                 *tx,
-                                 Params().GetConsensus(),
-                                 nHeight,
-                                 0,
-                                 nullptr,
-                                 0,
-                                 evmTemplateId,
-                                 isEvmEnabledForBlock,
-                                 false);
+        auto res = ApplyCustomTx(blockCtx, txCtx);
 
         result.pushKV("valid", res.ok);
     } else {
@@ -699,13 +728,11 @@ UniValue getcustomtx(const JSONRPCRequest &request) {
     }
 
     if (!hashBlock.IsNull()) {
-        LOCK(cs_main);
-
         result.pushKV("blockhash", hashBlock.GetHex());
         if (blockindex) {
             result.pushKV("blockHeight", blockindex->nHeight);
             result.pushKV("blockTime", blockindex->GetBlockTime());
-            result.pushKV("confirmations", 1 + ::ChainActive().Height() - blockindex->nHeight);
+            result.pushKV("confirmations", 1 + view->GetLastHeight() - blockindex->nHeight);
         } else {
             result.pushKV("confirmations", 0);
         }
@@ -803,51 +830,45 @@ UniValue minttokens(const JSONRPCRequest &request) {
     CMutableTransaction rawTx(txVersion);
     CTransactionRef optAuthTx;
 
+    auto [view, accountView, vaultView] = GetSnapshots();
+
     // auth
     std::set<CScript> auths;
     auto needFoundersAuth{false};
     if (txInputs.isNull() || txInputs.empty()) {
         LOCK(cs_main);  // needed for coins tip
         for (const auto &[id, amount] : minted.balances) {
-            const auto token = pcustomcsview->GetToken(id);
+            const auto token = view->GetToken(id);
             if (!token) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Token %s does not exist!", id.ToString()));
             }
 
-            if (token->IsDAT()) {
-                auto found{false};
-                auto attributes = pcustomcsview->GetAttributes();
+            if (targetHeight < Params().GetConsensus().DF24Height && token->IsDAT()) {
+                needFoundersAuth = true;
+            }
 
-                if (attributes) {
-                    CDataStructureV0 enableKey{AttributeTypes::Param, ParamIDs::Feature, DFIPKeys::ConsortiumEnabled};
-                    if (attributes->GetValue(enableKey, false)) {
-                        CDataStructureV0 membersKey{AttributeTypes::Consortium, id.v, ConsortiumKeys::MemberValues};
-                        auto members = attributes->GetValue(membersKey, CConsortiumMembers{});
-
-                        for (const auto &member : members) {
-                            if (IsMineCached(*pwallet, member.second.ownerAddress)) {
-                                auths.insert(member.second.ownerAddress);
-                                found = true;
-                            }
-                        }
+            Coin authCoin;
+            if (targetHeight >= Params().GetConsensus().DF24Height) {
+                if (const auto txid = view->GetNewTokenCollateralTXID(id.v); txid != uint256{}) {
+                    authCoin = ::ChainstateActive().CoinsTip().AccessCoin(COutPoint(txid, 1));
+                    if (IsMineCached(*pwallet, authCoin.out.scriptPubKey)) {
+                        auths.insert(authCoin.out.scriptPubKey);
                     }
                 }
-
-                if (!found) {
-                    needFoundersAuth = true;
-                }
             }
-            // Get token owner auth if present
-            const Coin &authCoin =
-                ::ChainstateActive().CoinsTip().AccessCoin(COutPoint(token->creationTx, 1));  // always n=1 output
-            if (IsMineCached(*pwallet, authCoin.out.scriptPubKey)) {
-                auths.insert(authCoin.out.scriptPubKey);
+
+            if (authCoin.IsSpent()) {
+                // Get token owner auth if present
+                authCoin = ::ChainstateActive().CoinsTip().AccessCoin(COutPoint(token->creationTx, 1));
+                if (IsMineCached(*pwallet, authCoin.out.scriptPubKey)) {
+                    auths.insert(authCoin.out.scriptPubKey);
+                }
             }
         }
     }
 
     rawTx.vin = GetAuthInputsSmart(
-        pwallet, rawTx.nVersion, auths, needFoundersAuth, optAuthTx, txInputs, request.metadata.coinSelectOpts);
+        pwallet, rawTx.nVersion, auths, needFoundersAuth, optAuthTx, txInputs, *view, request.metadata.coinSelectOpts);
 
     CDataStream metadata(DfTxMarker, SER_NETWORK, PROTOCOL_VERSION);
     metadata << static_cast<unsigned char>(CustomTxType::MintToken) << mintTokensMessage;
@@ -949,25 +970,9 @@ UniValue burntokens(const JSONRPCRequest &request) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameters, argument \"amounts\" must not be null");
     }
 
+    auto [view, accountView, vaultView] = GetSnapshots();
+
     if (burnedTokens.amounts.balances.size() == 1 && metaObj["from"].isNull() && metaObj["context"].isNull()) {
-        auto attributes = pcustomcsview->GetAttributes();
-
-        if (attributes) {
-            CDataStructureV0 enableKey{AttributeTypes::Param, ParamIDs::Feature, DFIPKeys::ConsortiumEnabled};
-            if (attributes->GetValue(enableKey, false)) {
-                CDataStructureV0 membersKey{AttributeTypes::Consortium,
-                                            burnedTokens.amounts.balances.begin()->first.v,
-                                            ConsortiumKeys::MemberValues};
-                auto members = attributes->GetValue(membersKey, CConsortiumMembers{});
-
-                for (const auto &member : members) {
-                    if (IsMineCached(*pwallet, member.second.ownerAddress)) {
-                        burnedTokens.from = member.second.ownerAddress;
-                        break;
-                    }
-                }
-            }
-        }
         if (burnedTokens.from.empty()) {
             throw JSONRPCError(
                 RPC_INVALID_PARAMETER,
@@ -994,8 +999,8 @@ UniValue burntokens(const JSONRPCRequest &request) {
     CMutableTransaction rawTx(txVersion);
     CTransactionRef optAuthTx;
 
-    rawTx.vin =
-        GetAuthInputsSmart(pwallet, rawTx.nVersion, auths, false, optAuthTx, txInputs, request.metadata.coinSelectOpts);
+    rawTx.vin = GetAuthInputsSmart(
+        pwallet, rawTx.nVersion, auths, false, optAuthTx, txInputs, *view, request.metadata.coinSelectOpts);
 
     CDataStream metadata(DfTxMarker, SER_NETWORK, PROTOCOL_VERSION);
     metadata << static_cast<unsigned char>(CustomTxType::BurnToken) << burnedTokens;
@@ -1069,7 +1074,7 @@ UniValue decodecustomtx(const JSONRPCRequest &request) {
     std::string warnings;
 
     if (tx) {
-        LOCK(cs_main);
+        auto [view, accountView, vaultView] = GetSnapshots();
 
         // Skip coinbase TXs except for genesis block
         if (tx->IsCoinBase()) {
@@ -1077,7 +1082,7 @@ UniValue decodecustomtx(const JSONRPCRequest &request) {
         }
         // get custom tx info. We pass nHeight INT_MAX,
         // just to get over hardfork validations. txResults are based on transaction metadata.
-        res = RpcInfo(*tx, std::numeric_limits<int>::max(), guess, txResults);
+        res = RpcInfo(*view, *tx, std::numeric_limits<int>::max(), guess, txResults);
         if (guess == CustomTxType::None) {
             return "Not a custom transaction";
         }

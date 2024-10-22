@@ -78,7 +78,6 @@ CAmount GetProposalCreationFee(int, const CCustomCSView &view, const CCreateProp
     auto type = static_cast<CProposalType>(msg.type);
     auto options = static_cast<CProposalOption>(msg.options);
     auto attributes = view.GetAttributes();
-    assert(attributes);
 
     CDataStructureV0 CFPKey{AttributeTypes::Governance, GovernanceIDs::Proposals, GovernanceKeys::CFPFee};
     CDataStructureV0 VOCKey{AttributeTypes::Governance, GovernanceIDs::Proposals, GovernanceKeys::VOCFee};
@@ -101,6 +100,13 @@ CAmount GetProposalCreationFee(int, const CCustomCSView &view, const CCreateProp
             }
     }
     return -1;
+}
+
+uint8_t GetTimelockLoops(const uint16_t timelock, const int blockHeight) {
+    if (blockHeight < Params().GetConsensus().DF10EunosPayaHeight) {
+        return 1;
+    }
+    return timelock == CMasternode::TENYEAR ? 4 : timelock == CMasternode::FIVEYEAR ? 3 : 2;
 }
 
 CMasternode::CMasternode()
@@ -532,13 +538,15 @@ void CMasternodesView::EraseSubNodesLastBlockTime(const uint256 &nodeId, const u
 std::optional<uint16_t> CMasternodesView::GetTimelock(const uint256 &nodeId,
                                                       const CMasternode &node,
                                                       const uint64_t height) const {
-    if (const auto timelock = ReadBy<Timelock, uint16_t>(nodeId); timelock) {
+    if (const auto timelock = ReadBy<Timelock, uint16_t>(nodeId)) {
         LOCK(cs_main);
         // Get last height
         auto lastHeight = height - 1;
 
+        uint64_t resignDelay = GetMnResignDelay(height);
+
         // Cannot expire below block count required to calculate average time
-        if (lastHeight < static_cast<uint64_t>(Params().GetConsensus().mn.newResignDelay)) {
+        if (lastHeight < resignDelay) {
             return *timelock;
         }
 
@@ -547,7 +555,7 @@ std::optional<uint16_t> CMasternodesView::GetTimelock(const uint256 &nodeId,
 
         // Get average time of the last two times the activation delay worth of blocks
         uint64_t totalTime{0};
-        for (; lastHeight + Params().GetConsensus().mn.newResignDelay >= height; --lastHeight) {
+        for (; lastHeight + resignDelay >= height; --lastHeight) {
             const auto &blockIndex{::ChainActive()[lastHeight]};
             // Last height might not be available due to rollback or call to invalidateblock
             if (!blockIndex) {
@@ -555,7 +563,7 @@ std::optional<uint16_t> CMasternodesView::GetTimelock(const uint256 &nodeId,
             }
             totalTime += blockIndex->nTime;
         }
-        const uint32_t averageTime = totalTime / Params().GetConsensus().mn.newResignDelay;
+        const uint32_t averageTime = totalTime / resignDelay;
 
         // Below expiration return timelock
         if (averageTime < timelockExpire) {
@@ -591,7 +599,7 @@ std::vector<int64_t> CMasternodesView::GetBlockTimes(const CKeyID &keyID,
         }
 
         // If no values set for pre-fork MN use the fork time
-        const uint8_t loops = timelock == CMasternode::TENYEAR ? 4 : timelock == CMasternode::FIVEYEAR ? 3 : 2;
+        const auto loops = GetTimelockLoops(timelock, blockHeight);
         for (uint8_t i{0}; i < loops; ++i) {
             if (!subNodesBlockTime[i]) {
                 subNodesBlockTime[i] = block->GetBlockTime();
@@ -783,6 +791,11 @@ CCustomCSView::CCustomCSView(CStorageKV &st)
     CheckPrefixes();
 }
 
+CCustomCSView::CCustomCSView(std::unique_ptr<CStorageLevelDB> &st, MapKV &changed)
+    : CStorageView(new CFlushableStorageKV(st, changed)) {
+    CheckPrefixes();
+}
+
 // cache-upon-a-cache (not a copy!) constructor
 CCustomCSView::CCustomCSView(CCustomCSView &other)
     : CStorageView(new CFlushableStorageKV(other.DB())),
@@ -948,8 +961,11 @@ bool CCustomCSView::CanSpend(const uint256 &txId, int height) const {
         return state == CMasternode::RESIGNED;
     }
 
+    if (NewTokenCollateralExists(txId)) {
+        return false;
+    }
+
     // check if it was token collateral and token already destroyed
-    /// @todo token check for total supply/limit when implemented
     auto pair = GetTokenByCreationTx(txId);
     return !pair || pair->second.destructionTx != uint256{} || pair->second.IsPoolShare();
 }
@@ -965,17 +981,29 @@ bool CCustomCSView::CalculateOwnerRewards(const CScript &owner, uint32_t targetH
             return true;  // no share or target height is before a pool share' one
         }
         auto onLiquidity = [&]() -> CAmount { return GetBalance(owner, poolId).nValue; };
-        auto beginHeight = std::max(*height, balanceHeight);
-        CalculatePoolRewards(
-            poolId, onLiquidity, beginHeight, targetHeight, [&](RewardType, CTokenAmount amount, uint32_t height) {
-                auto res = AddBalance(owner, amount);
-                if (!res) {
-                    LogPrintf("Pool rewards: can't update balance of %s: %s, height %ld\n",
-                              owner.GetHex(),
-                              res.msg,
-                              targetHeight);
-                }
-            });
+        const auto beginHeight = std::max(*height, balanceHeight);
+        auto onReward = [&](RewardType, const CTokenAmount &amount, const uint32_t height) {
+            if (auto res = AddBalance(owner, amount); !res) {
+                LogPrintf(
+                    "Pool rewards: can't update balance of %s: %s, height %ld\n", owner.GetHex(), res.msg, height);
+            }
+        };
+
+        if (beginHeight < Params().GetConsensus().DF24Height) {
+            // Calculate just up to the fork height
+            const auto targetNewHeight =
+                targetHeight >= Params().GetConsensus().DF24Height ? Params().GetConsensus().DF24Height : targetHeight;
+            CalculatePoolRewards(poolId, onLiquidity, beginHeight, targetNewHeight, onReward);
+        }
+
+        if (targetHeight >= Params().GetConsensus().DF24Height) {
+            // Calculate from the fork height
+            const auto beginNewHeight = beginHeight < Params().GetConsensus().DF24Height
+                                            ? Params().GetConsensus().DF24Height - 1
+                                            : beginHeight - 1;
+            CalculateStaticPoolRewards(onLiquidity, onReward, poolId.v, beginNewHeight, targetHeight);
+        }
+
         return true;
     });
 
@@ -1196,11 +1224,9 @@ uint256 CCustomCSView::MerkleRoot() {
     return ComputeMerkleRoot(std::move(hashes));
 }
 
+// FIXME: this returns true if *any* of the tokenIds is locked. feels wrong.
 bool CCustomCSView::AreTokensLocked(const std::set<uint32_t> &tokenIds) const {
     const auto attributes = GetAttributes();
-    if (!attributes) {
-        return false;
-    }
 
     for (const auto &tokenId : tokenIds) {
         CDataStructureV0 lockKey{AttributeTypes::Locks, ParamIDs::TokenID, tokenId};
@@ -1279,21 +1305,20 @@ std::map<CKeyID, CKey> AmISignerNow(int height, const CAnchorData::CTeam &team) 
 }
 
 std::optional<CLoanView::CLoanSetLoanTokenImpl> CCustomCSView::GetLoanTokenFromAttributes(const DCT_ID &id) const {
-    if (const auto attributes = GetAttributes()) {
-        CDataStructureV0 pairKey{AttributeTypes::Token, id.v, TokenKeys::FixedIntervalPriceId};
-        CDataStructureV0 interestKey{AttributeTypes::Token, id.v, TokenKeys::LoanMintingInterest};
-        CDataStructureV0 mintableKey{AttributeTypes::Token, id.v, TokenKeys::LoanMintingEnabled};
+    const auto attributes = GetAttributes();
+    CDataStructureV0 pairKey{AttributeTypes::Token, id.v, TokenKeys::FixedIntervalPriceId};
+    CDataStructureV0 interestKey{AttributeTypes::Token, id.v, TokenKeys::LoanMintingInterest};
+    CDataStructureV0 mintableKey{AttributeTypes::Token, id.v, TokenKeys::LoanMintingEnabled};
 
-        if (const auto token = GetToken(id); token && attributes->CheckKey(pairKey) &&
-                                             attributes->CheckKey(interestKey) && attributes->CheckKey(mintableKey)) {
-            CLoanView::CLoanSetLoanTokenImpl loanToken;
-            loanToken.fixedIntervalPriceId = attributes->GetValue(pairKey, CTokenCurrencyPair{});
-            loanToken.interest = attributes->GetValue(interestKey, CAmount{});
-            loanToken.mintable = attributes->GetValue(mintableKey, false);
-            loanToken.symbol = token->symbol;
-            loanToken.name = token->name;
-            return loanToken;
-        }
+    if (const auto token = GetToken(id); token && attributes->CheckKey(pairKey) && attributes->CheckKey(interestKey) &&
+                                         attributes->CheckKey(mintableKey)) {
+        CLoanView::CLoanSetLoanTokenImpl loanToken;
+        loanToken.fixedIntervalPriceId = attributes->GetValue(pairKey, CTokenCurrencyPair{});
+        loanToken.interest = attributes->GetValue(interestKey, CAmount{});
+        loanToken.mintable = attributes->GetValue(mintableKey, false);
+        loanToken.symbol = token->symbol;
+        loanToken.name = token->name;
+        return loanToken;
     }
 
     return {};
@@ -1301,50 +1326,42 @@ std::optional<CLoanView::CLoanSetLoanTokenImpl> CCustomCSView::GetLoanTokenFromA
 
 std::optional<CLoanView::CLoanSetCollateralTokenImpl> CCustomCSView::GetCollateralTokenFromAttributes(
     const DCT_ID &id) const {
-    if (const auto attributes = GetAttributes()) {
-        CLoanSetCollateralTokenImplementation collToken;
+    const auto attributes = GetAttributes();
+    CLoanSetCollateralTokenImplementation collToken;
 
-        CDataStructureV0 pairKey{AttributeTypes::Token, id.v, TokenKeys::FixedIntervalPriceId};
-        CDataStructureV0 factorKey{AttributeTypes::Token, id.v, TokenKeys::LoanCollateralFactor};
+    CDataStructureV0 pairKey{AttributeTypes::Token, id.v, TokenKeys::FixedIntervalPriceId};
+    CDataStructureV0 factorKey{AttributeTypes::Token, id.v, TokenKeys::LoanCollateralFactor};
 
-        if (attributes->CheckKey(pairKey) && attributes->CheckKey(factorKey)) {
-            collToken.fixedIntervalPriceId = attributes->GetValue(pairKey, CTokenCurrencyPair{});
-            collToken.factor = attributes->GetValue(factorKey, CAmount{0});
-            collToken.idToken = id;
+    if (attributes->CheckKey(pairKey) && attributes->CheckKey(factorKey)) {
+        collToken.fixedIntervalPriceId = attributes->GetValue(pairKey, CTokenCurrencyPair{});
+        collToken.factor = attributes->GetValue(factorKey, CAmount{0});
+        collToken.idToken = id;
 
-            auto token = GetToken(id);
-            if (token) {
-                collToken.creationTx = token->creationTx;
-            }
-
-            return collToken;
+        auto token = GetToken(id);
+        if (token) {
+            collToken.creationTx = token->creationTx;
         }
+
+        return collToken;
     }
 
     return {};
 }
 
 uint32_t CCustomCSView::GetVotingPeriodFromAttributes() const {
-    auto attributes = GetAttributes();
-    assert(attributes);
-
+    const auto attributes = GetAttributes();
     CDataStructureV0 votingKey{AttributeTypes::Governance, GovernanceIDs::Proposals, GovernanceKeys::VotingPeriod};
-
     return attributes->GetValue(votingKey, Params().GetConsensus().props.votingPeriod);
 }
 
 uint32_t CCustomCSView::GetEmergencyPeriodFromAttributes(const CProposalType &type) const {
-    auto attributes = GetAttributes();
-    assert(attributes);
-
+    const auto attributes = GetAttributes();
     CDataStructureV0 VOCKey{AttributeTypes::Governance, GovernanceIDs::Proposals, GovernanceKeys::VOCEmergencyPeriod};
     return attributes->GetValue(VOCKey, Params().GetConsensus().props.emergencyPeriod);
 }
 
 CAmount CCustomCSView::GetApprovalThresholdFromAttributes(const CProposalType &type) const {
-    auto attributes = GetAttributes();
-    assert(attributes);
-
+    const auto attributes = GetAttributes();
     CDataStructureV0 CFPKey{AttributeTypes::Governance, GovernanceIDs::Proposals, GovernanceKeys::CFPApprovalThreshold};
     CDataStructureV0 VOCKey{AttributeTypes::Governance, GovernanceIDs::Proposals, GovernanceKeys::VOCApprovalThreshold};
 
@@ -1359,8 +1376,7 @@ CAmount CCustomCSView::GetApprovalThresholdFromAttributes(const CProposalType &t
 }
 
 CAmount CCustomCSView::GetQuorumFromAttributes(const CProposalType &type, bool emergency) const {
-    auto attributes = GetAttributes();
-    assert(attributes);
+    const auto attributes = GetAttributes();
 
     CDataStructureV0 quorumKey{AttributeTypes::Governance, GovernanceIDs::Proposals, GovernanceKeys::Quorum};
     CDataStructureV0 vocEmergencyQuorumKey{
@@ -1374,8 +1390,7 @@ CAmount CCustomCSView::GetQuorumFromAttributes(const CProposalType &type, bool e
 }
 
 CAmount CCustomCSView::GetFeeBurnPctFromAttributes() const {
-    auto attributes = GetAttributes();
-    assert(attributes);
+    const auto attributes = GetAttributes();
 
     CDataStructureV0 feeBurnPctKey{AttributeTypes::Governance, GovernanceIDs::Proposals, GovernanceKeys::FeeBurnPct};
 

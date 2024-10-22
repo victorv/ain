@@ -9,7 +9,54 @@
 #include <rpc/request.h>
 #include <univalue.h>
 
+#include <boost/multiprecision/cpp_int.hpp>
+
 extern std::string ScriptToString(const CScript &script);
+
+// Extract the lower 64 bits of arith_uint256 and convert to int64_t
+static int64_t arith_uint256_to_int64(const arith_uint256 &value) {
+    auto lower64 = value.GetLow64();
+    if (value > arith_uint256(std::numeric_limits<int64_t>::max())) {
+        return std::numeric_limits<int64_t>::max();
+    } else {
+        return lower64;
+    }
+}
+
+// Ceil arith_uint256 to int64_t
+static auto ceil_arith_uint256_to_int64(const arith_uint256 &value) {
+    int64_t lower64 = arith_uint256_to_int64(value);
+    const auto truncated_value = arith_uint256(lower64);
+    if (truncated_value < value && lower64 != std::numeric_limits<int64_t>::max()) {
+        lower64 += 1;
+    }
+    return lower64;
+}
+
+// Convert arith_uint256 to a string with high precision
+auto GetHighPrecisionString(const arith_uint256 &value) {
+    struct HighPrecisionInterestValue {
+        typedef boost::multiprecision::uint256_t boost256;
+
+        boost256 internalValue;
+
+        explicit HighPrecisionInterestValue(const arith_uint256 &val)
+            : internalValue("0x" + val.GetHex()) {}
+
+        auto GetFloatingPoint() const { return internalValue % COIN; }
+
+        auto GetInteger() const { return internalValue / COIN; }
+
+        std::string GetInterestPerBlockString() const {
+            std::ostringstream result;
+            const auto floatingPoint = GetFloatingPoint();
+            const auto integer = GetInteger();
+            result << integer << "." << std::setw(8) << std::setfill('0') << floatingPoint;
+            return result.str();
+        }
+    };
+    return HighPrecisionInterestValue(value).GetInterestPerBlockString();
+}
 
 class CCustomTxRpcVisitor {
     uint32_t height;
@@ -24,6 +71,7 @@ class CCustomTxRpcVisitor {
         rpcInfo.pushKV("mintable", token.IsMintable());
         rpcInfo.pushKV("tradeable", token.IsTradeable());
         rpcInfo.pushKV("finalized", token.IsFinalized());
+        rpcInfo.pushKV("deprecated", token.IsDeprecated());
     }
 
     void customRewardsInfo(const CBalances &rewards) const {
@@ -116,7 +164,10 @@ public:
 
     void operator()(const CUpdateTokenPreAMKMessage &obj) const { rpcInfo.pushKV("isDAT", obj.isDAT); }
 
-    void operator()(const CUpdateTokenMessage &obj) const { tokenInfo(obj.token); }
+    void operator()(const CUpdateTokenMessage &obj) const {
+        tokenInfo(obj.token);
+        rpcInfo.pushKV("newCollateralAddress", obj.newCollateralAddress);
+    }
 
     void operator()(const CMintTokensMessage &obj) const {
         rpcInfo.pushKVs(tokenBalances(obj));
@@ -244,7 +295,10 @@ public:
             auto price = PoolPrice::getMaxValid();
             rpcInfo.pushKV("maxPrice", ValueFromAmount((price.integer * COIN) + price.fraction));
         } else {
-            rpcInfo.pushKV("maxPrice", ValueFromAmount((obj.maxPrice.integer * COIN) + obj.maxPrice.fraction));
+            const auto consensusCalc = arith_uint256(obj.maxPrice.integer) * COIN + obj.maxPrice.fraction;
+            const auto ceiledValue = ceil_arith_uint256_to_int64(consensusCalc);
+            rpcInfo.pushKV("maxPrice", ValueFromAmount(ceiledValue));
+            rpcInfo.pushKV("maxPriceHighPrecision", GetHighPrecisionString(consensusCalc));
         }
     }
 
@@ -286,6 +340,20 @@ public:
         rpcInfo.pushKV(obj.govVar->GetName(), obj.govVar->Export());
         rpcInfo.pushKV("startHeight", static_cast<uint64_t>(obj.startHeight));
     }
+
+    void operator()(const CGovernanceUnsetHeightMessage &obj) const {
+        for (const auto &gov : obj.govs) {
+            UniValue keys(UniValue::VARR);
+            for (const auto &key : gov.second) {
+                keys.push_back(key);
+            }
+
+            rpcInfo.pushKV(gov.first, keys);
+        }
+        rpcInfo.pushKV("unsetHeight", static_cast<uint64_t>(obj.unsetHeight));
+    }
+
+    void operator()(const CGovernanceClearHeightMessage &obj) const {}
 
     void operator()(const CAppointOracleMessage &obj) const {
         rpcInfo.pushKV("oracleAddress", ScriptToString(obj.oracleAddress));
@@ -595,12 +663,15 @@ public:
     void operator()(const CEvmTxMessage &obj) const {
         auto txHash = tx.GetHash().GetHex();
         if (auto evmTxHash = mnview.GetVMDomainTxEdge(VMDomainEdge::DVMToEVM, txHash)) {
+            const auto hash = uint256S(*evmTxHash);
+
             CrossBoundaryResult result;
-            auto txInfo = evm_try_get_tx_by_hash(result, *evmTxHash);
+            auto txInfo = evm_try_get_tx_by_hash(result, hash.GetByteArray());
             if (!result.ok) {
                 LogPrintf("Failed to get EVM tx info for tx %s: %s\n", txHash, result.reason.c_str());
                 return;
             }
+
             std::string tx_type;
             switch (txInfo.tx_type) {
                 case CEVMTxType::LegacyTransaction: {
@@ -619,24 +690,31 @@ public:
                     break;
                 }
             }
+            const auto sender = ETH_ADDR_PREFIX + uint160::FromByteArray(txInfo.sender).GetHex();
+            const auto to = ETH_ADDR_PREFIX + uint160::FromByteArray(txInfo.to).GetHex();
+
             rpcInfo.pushKV("type", tx_type);
-            rpcInfo.pushKV("hash", *evmTxHash);
-            rpcInfo.pushKV("sender", std::string(txInfo.sender.data(), txInfo.sender.length()));
+            rpcInfo.pushKV("hash", hash.GetHex());
+            rpcInfo.pushKV("sender", sender);
             rpcInfo.pushKV("nonce", txInfo.nonce);
             rpcInfo.pushKV("gasPrice", txInfo.gas_price);
             rpcInfo.pushKV("gasLimit", txInfo.gas_limit);
             rpcInfo.pushKV("maxFeePerGas", txInfo.max_fee_per_gas);
             rpcInfo.pushKV("maxPriorityFeePerGas", txInfo.max_priority_fee_per_gas);
             rpcInfo.pushKV("createTx", txInfo.create_tx);
-            rpcInfo.pushKV("to", std::string(txInfo.to.data(), txInfo.to.length()));
+            rpcInfo.pushKV("to", to);
             rpcInfo.pushKV("value", txInfo.value);
         }
     }
 
     void operator()(const CCustomTxMessageNone &) const {}
+
+    void operator()(const CReleaseLockMessage &obj) const {
+        rpcInfo.pushKV("releasePart", GetDecimalString(obj.releasePart));
+    }
 };
 
-Res RpcInfo(const CTransaction &tx, uint32_t height, CustomTxType &txType, UniValue &results) {
+Res RpcInfo(CCustomCSView &view, const CTransaction &tx, uint32_t height, CustomTxType &txType, UniValue &results) {
     std::vector<unsigned char> metadata;
     txType = GuessCustomTxType(tx, metadata);
     if (txType == CustomTxType::None) {
@@ -646,8 +724,7 @@ Res RpcInfo(const CTransaction &tx, uint32_t height, CustomTxType &txType, UniVa
     auto consensus = Params().GetConsensus();
     auto res = CustomMetadataParse(height, consensus, metadata, txMessage);
     if (res) {
-        CCustomCSView mnview(*pcustomcsview);
-        std::visit(CCustomTxRpcVisitor(tx, height, mnview, results), txMessage);
+        std::visit(CCustomTxRpcVisitor(tx, height, view, results), txMessage);
     }
     return res;
 }

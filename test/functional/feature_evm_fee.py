@@ -34,7 +34,6 @@ class EVMFeeTest(DefiTestFramework):
                 "-grandcentralheight=101",
                 "-metachainheight=105",
                 "-subsidytest=1",
-                "-txindex=1",
             ],
         ]
 
@@ -132,7 +131,7 @@ class EVMFeeTest(DefiTestFramework):
 
         assert_raises_rpc_error(
             -32001,
-            "evm tx failed to pre-validate tx gas price is lower than initial block base fee",
+            "tx gas price is lower than initial block base fee",
             self.nodes[0].eth_sendTransaction,
             {
                 "from": self.ethAddress,
@@ -198,19 +197,19 @@ class EVMFeeTest(DefiTestFramework):
             },
         )
 
-        # # Test insufficient balance due to high gas fees
-        # assert_raises_rpc_error(
-        #     -32001,
-        #     "evm tx failed to validate prepay fee value overflow",
-        #     self.nodes[0].eth_sendTransaction,
-        #     {
-        #         "from": self.ethAddress,
-        #         "to": self.toAddress,
-        #         "value": "0x7148",  # 29_000
-        #         "gas": "0x7a120",
-        #         "gasPrice": "0xfffffffffffffff",
-        #     },
-        # )
+        # Test insufficient balance due to high gas fees
+        assert_raises_rpc_error(
+            -32001,
+            "insufficient balance to pay fees",
+            self.nodes[0].eth_sendTransaction,
+            {
+                "from": self.ethAddress,
+                "to": self.toAddress,
+                "value": "0x7148",  # 29_000
+                "gas": "0x7a120",
+                "gasPrice": "0xfffffffffffffff",
+            },
+        )
 
         self.rollback_to(height)
 
@@ -222,7 +221,7 @@ class EVMFeeTest(DefiTestFramework):
 
         assert_raises_rpc_error(
             -32001,
-            "evm tx failed to pre-validate gas limit is below the minimum gas per tx",
+            "gas limit is below the minimum gas per tx",
             self.nodes[0].eth_sendTransaction,
             {
                 "from": self.ethAddress,
@@ -243,7 +242,7 @@ class EVMFeeTest(DefiTestFramework):
 
         assert_raises_rpc_error(
             -32001,
-            "evm tx failed to pre-validate gas limit higher than max_gas_per_block",
+            "gas limit higher than max_gas_per_block",
             self.nodes[0].eth_sendTransaction,
             {
                 "from": self.ethAddress,
@@ -262,7 +261,10 @@ class EVMFeeTest(DefiTestFramework):
         emptyAddress = self.nodes[0].getnewaddress("", "erc55")
         balance = self.nodes[0].eth_getBalance(emptyAddress, "latest")
         assert_equal(int(balance[2:], 16), 000000000000000000000)
-        self.nodes[0].eth_sendTransaction(
+        assert_raises_rpc_error(
+            -32001,
+            "insufficient balance to pay fees",
+            self.nodes[0].eth_sendTransaction,
             {
                 "from": emptyAddress,
                 "to": self.toAddress,
@@ -273,7 +275,7 @@ class EVMFeeTest(DefiTestFramework):
         )
         self.nodes[0].generate(1)
         block = self.nodes[0].getblock(self.nodes[0].getbestblockhash())
-        # Tx should be valid and enter the mempool, but will not be minted into the block
+        # Check for empty block
         assert_equal(len(block["tx"]), 1)
 
         self.rollback_to(height)
@@ -325,6 +327,7 @@ class EVMFeeTest(DefiTestFramework):
                         "amount": "100@DFI",
                         "domain": 3,
                     },
+                    "singlekeycheck": False,
                 }
             ]
         )
@@ -342,7 +345,7 @@ class EVMFeeTest(DefiTestFramework):
 
         self.test_gas_limit_higher_than_block_limit()
 
-        # self.test_fee_deduction_empty_balance() // TODO assert correct behaviour
+        self.test_fee_deduction_empty_balance()
 
         self.test_fee_deduction_send_full_balance()
 

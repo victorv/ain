@@ -7,8 +7,10 @@
 #include <dfi/consensus/poolpairs.h>
 #include <dfi/masternodes.h>
 #include <dfi/mn_checks.h>
+#include <ffi/ffiocean.h>
 
 Res CPoolPairsConsensus::EraseEmptyBalances(TAmounts &balances) const {
+    auto &mnview = blockCtx.GetView();
     for (auto it = balances.begin(), next_it = it; it != balances.end(); it = next_it) {
         ++next_it;
 
@@ -24,13 +26,20 @@ Res CPoolPairsConsensus::EraseEmptyBalances(TAmounts &balances) const {
 }
 
 Res CPoolPairsConsensus::operator()(const CCreatePoolPairMessage &obj) const {
-    // check foundation auth
-    if (auto res = HasFoundationAuth(); !res) {
+    // Check foundation auth
+    auto authCheck = AuthManager(blockCtx, txCtx);
+    if (auto res = authCheck.HasGovOrFoundationAuth(); !res) {
         return res;
     }
+
     if (obj.commission < 0 || obj.commission > COIN) {
         return Res::Err("wrong commission");
     }
+
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    const auto &tx = txCtx.GetTransaction();
+    auto &mnview = blockCtx.GetView();
 
     if (height >= static_cast<uint32_t>(consensus.DF16FortCanningCrunchHeight)) {
         if (obj.pairSymbol.find('/') != std::string::npos) {
@@ -74,7 +83,9 @@ Res CPoolPairsConsensus::operator()(const CCreatePoolPairMessage &obj) const {
     token.creationTx = tx.GetHash();
     token.creationHeight = height;
 
-    auto tokenId = mnview.CreateToken(token, false);
+    // EVM Template will be null so no DST20 will be created
+    BlockContext dummyContext{std::numeric_limits<uint32_t>::max(), {}, consensus};
+    auto tokenId = mnview.CreateToken(token, dummyContext);
     if (!tokenId) {
         return tokenId;
     }
@@ -91,8 +102,9 @@ Res CPoolPairsConsensus::operator()(const CCreatePoolPairMessage &obj) const {
 }
 
 Res CPoolPairsConsensus::operator()(const CUpdatePoolPairMessage &obj) const {
-    // check foundation auth
-    if (auto res = HasFoundationAuth(); !res) {
+    // Check foundation auth
+    auto authCheck = AuthManager(blockCtx, txCtx);
+    if (auto res = authCheck.HasGovOrFoundationAuth(); !res) {
         return res;
     }
 
@@ -108,6 +120,39 @@ Res CPoolPairsConsensus::operator()(const CUpdatePoolPairMessage &obj) const {
             }
         }
     }
+
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    auto &mnview = blockCtx.GetView();
+
+    auto token = mnview.GetToken(obj.poolId);
+    if (!token) {
+        return Res::Err("Pool token %d does not exist\n", obj.poolId.v);
+    }
+
+    const auto tokenUpdated = !obj.pairSymbol.empty() || !obj.pairName.empty();
+    if (tokenUpdated) {
+        if (height < static_cast<uint32_t>(consensus.DF23Height)) {
+            return Res::Err("Poolpair symbol cannot be changed below DF23 height");
+        }
+    }
+
+    if (!obj.pairSymbol.empty()) {
+        token->symbol = trim_ws(obj.pairSymbol).substr(0, CToken::MAX_TOKEN_POOLPAIR_LENGTH);
+    }
+
+    if (!obj.pairName.empty()) {
+        token->name = trim_ws(obj.pairName).substr(0, CToken::MAX_TOKEN_NAME_LENGTH);
+    }
+
+    if (tokenUpdated) {
+        BlockContext dummyContext{std::numeric_limits<uint32_t>::max(), {}, Params().GetConsensus()};
+        UpdateTokenContext ctx{*token, dummyContext, false, false, true};
+        if (auto res = mnview.UpdateToken(ctx); !res) {
+            return res;
+        }
+    }
+
     return mnview.UpdatePoolPair(obj.poolId, height, obj.status, obj.commission, obj.ownerAddress, rewards);
 }
 
@@ -117,7 +162,13 @@ Res CPoolPairsConsensus::operator()(const CPoolSwapMessage &obj) const {
         return res;
     }
 
-    return CPoolSwap(obj, height).ExecuteSwap(mnview, {}, consensus);
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    const auto &tx = txCtx.GetTransaction();
+    auto &mnview = blockCtx.GetView();
+
+    return CPoolSwap(obj, height, std::make_pair(CustomTxType::PoolSwap, tx.GetHash()))
+        .ExecuteSwap(mnview, {}, consensus);
 }
 
 Res CPoolPairsConsensus::operator()(const CPoolSwapMessageV2 &obj) const {
@@ -126,7 +177,13 @@ Res CPoolPairsConsensus::operator()(const CPoolSwapMessageV2 &obj) const {
         return res;
     }
 
-    return CPoolSwap(obj.swapInfo, height).ExecuteSwap(mnview, obj.poolIDs, consensus);
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    const auto &tx = txCtx.GetTransaction();
+    auto &mnview = blockCtx.GetView();
+
+    return CPoolSwap(obj.swapInfo, height, std::make_pair(CustomTxType::PoolSwapV2, tx.GetHash()))
+        .ExecuteSwap(mnview, obj.poolIDs, consensus);
 }
 
 Res CPoolPairsConsensus::operator()(const CLiquidityMessage &obj) const {
@@ -142,6 +199,10 @@ Res CPoolPairsConsensus::operator()(const CLiquidityMessage &obj) const {
     if (amountA.second <= 0 || amountB.second <= 0) {
         return Res::Err("amount cannot be less than or equal to zero");
     }
+
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    auto &mnview = blockCtx.GetView();
 
     auto pair = mnview.GetPoolPair(amountA.first, amountB.first);
     if (!pair) {
@@ -193,6 +254,9 @@ Res CPoolPairsConsensus::operator()(const CRemoveLiquidityMessage &obj) const {
     if (amount.nValue <= 0) {
         return Res::Err("amount cannot be less than or equal to zero");
     }
+
+    const auto height = txCtx.GetHeight();
+    auto &mnview = blockCtx.GetView();
 
     auto pair = mnview.GetPoolPair(amount.nTokenId);
     if (!pair) {

@@ -2551,7 +2551,7 @@ static UniValue listwalletdir(const JSONRPCRequest& request)
     UniValue wallets(UniValue::VARR);
     for (const auto& path : ListWalletDir()) {
         UniValue wallet(UniValue::VOBJ);
-        wallet.pushKV("name", path.string());
+        wallet.pushKV("name", path.u8string());
         wallets.push_back(wallet);
     }
 
@@ -2621,7 +2621,7 @@ static UniValue loadwallet(const JSONRPCRequest& request)
     } else if (fs::is_directory(location.GetPath())) {
         // The given filename is a directory. Check that there's a wallet.dat file.
         fs::path wallet_dat_file = location.GetPath() / "wallet.dat";
-        if (fs::symlink_status(wallet_dat_file).type() == fs::file_not_found) {
+        if (fs::symlink_status(wallet_dat_file).type() == fs::file_type::not_found) {
             throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Directory " + location.GetName() + " does not contain a wallet.dat file.");
         }
     }
@@ -3804,11 +3804,20 @@ UniValue getaddressinfo(const JSONRPCRequest& request)
     LOCK(pwallet->cs_wallet);
 
     UniValue ret(UniValue::VOBJ);
-    CTxDestination dest = DecodeDestination(request.params[0].get_str());
 
-    // Make sure the destination is valid
-    if (!IsValidDestination(dest)) {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+    const auto userAddress = request.params[0].get_str();
+    CTxDestination dest;
+    if (IsHex(userAddress)) {  // ScriptPubKey
+        const auto hexVec = ParseHex(userAddress);
+        const auto reqOwner = CScript(hexVec.begin(), hexVec.end());
+        if (!ExtractDestination(reqOwner, dest) || !IsValidDestination(dest)) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+        }
+    } else {  // Address
+        dest = DecodeDestination(userAddress);
+        if (!IsValidDestination(dest)) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+        }
     }
 
     std::string currentAddress = EncodeDestination(dest);
@@ -4283,13 +4292,14 @@ UniValue addressmap(const JSONRPCRequest &request) {
     }
         .Check(request);
 
-    auto throwInvalidParam = []() { throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid type parameter")); };
+    auto throwInvalidParamType = []() { throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid type parameter")); };
+    auto throwInvalidAddressFmt = []() { throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid address format")); };
 
     const std::string input = request.params[0].get_str();
 
     int typeInt = request.params[1].get_int();
     if (typeInt < 0 || typeInt >= AddressConversionTypeCount) {
-        throwInvalidParam();
+        throwInvalidParamType();
     }
 
     CTxDestination dest = DecodeDestination(input);
@@ -4315,7 +4325,7 @@ UniValue addressmap(const JSONRPCRequest &request) {
     switch (type) {
         case AddressConversionType::DVMToEVMAddress: {
             if (dest.index() != WitV0KeyHashType && dest.index() != PKHashType) {
-                throwInvalidParam();
+                throwInvalidAddressFmt();
             }
             CPubKey key = AddrToPubKey(pwallet, input);
             if (key.IsCompressed()) {
@@ -4326,17 +4336,16 @@ UniValue addressmap(const JSONRPCRequest &request) {
         }
         case AddressConversionType::EVMToDVMAddress: {
             if (dest.index() != WitV16KeyEthHashType) {
-                throwInvalidParam();
+                throwInvalidAddressFmt();
             }
             CPubKey key = AddrToPubKey(pwallet, input);
-            if (!key.IsCompressed()) {
-                key.Compress();
-            }
-            format.pushKV("bech32", EncodeDestination(WitnessV0KeyHash(key)));
+            auto [uncomp, comp] = GetBothPubkeyCompressions(key);
+            format.pushKV("bech32", EncodeDestination(WitnessV0KeyHash(comp)));
+            format.pushKV("legacy", EncodeDestination(PKHash(uncomp)));
             break;
         }
         default:
-            throwInvalidParam();
+            throwInvalidParamType();
     }
 
     ret.pushKV("format", format);

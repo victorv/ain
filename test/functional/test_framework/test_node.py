@@ -21,6 +21,7 @@ import collections
 import shlex
 import sys
 
+from test_framework.tokenamount import TokenAmount
 from web3 import Web3
 
 from .authproxy import JSONRPCException
@@ -78,7 +79,7 @@ class TestNode:
         extra_args=None,
         use_cli=False,
         start_perf=False,
-        use_valgrind=False
+        use_valgrind=False,
     ):
         """
         Kwargs:
@@ -279,10 +280,14 @@ class TestNode:
         # net
         "net_version",
         # debug
+        "debug_traceCall",
+        "debug_traceTransaction",
+        "debug_traceBlockByNumber",
+        "debug_traceBlockByHash",
         "debug_feeEstimate",
-        "debug_logqueues",
         # web3
         "web3_clientVersion",
+        "web3_sha3",
     }
 
     def get_genesis_keys(self):
@@ -384,7 +389,7 @@ class TestNode:
             stdout=stdout,
             stderr=stderr,
             cwd=cwd,
-            **kwargs
+            **kwargs,
         )
 
         self.running = True
@@ -439,7 +444,12 @@ class TestNode:
                 self.w3 = Web3(Web3.HTTPProvider(evm_rpc.url))
                 return
             except IOError as e:
-                if e.errno != errno.ECONNREFUSED:  # Port not yet open?
+                if e.errno not in [
+                    None,
+                    0,
+                    errno.ECONNREFUSED,
+                    errno.ECONNRESET,
+                ]:  # Port not yet open?
                     raise  # unknown IO error
             except JSONRPCException as e:  # Initialization phase
                 # -28 RPC in warmup
@@ -648,7 +658,7 @@ class TestNode:
         expected_msg=None,
         match=ErrorMatch.FULL_TEXT,
         *args,
-        **kwargs
+        **kwargs,
     ):
         """Attempt to start the node and expect it to raise an error.
 
@@ -754,6 +764,8 @@ class TestNodeCLIAttr:
 
 
 def arg_to_cli(arg):
+    if isinstance(arg, TokenAmount):
+        return str(arg)
     if isinstance(arg, bool):
         return str(arg).lower()
     elif isinstance(arg, dict) or isinstance(arg, list):

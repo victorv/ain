@@ -11,6 +11,8 @@
 #include <dfi/res.h>
 #include <dfi/vault.h>
 
+class ATTRIBUTES;
+class BlockContext;
 struct CBalances;
 class CCoinsViewCache;
 struct CCreateProposalMessage;
@@ -18,13 +20,14 @@ class CCustomCSView;
 struct CLoanSchemeData;
 class CPoolPair;
 class CScript;
-class CScopedTemplateID;
+class CScopedTemplate;
 class CTokenImplementation;
 class CTransaction;
 class CVaultAssets;
+class TransactionContext;
 
 namespace Consensus {
-struct Params;
+    struct Params;
 }
 
 enum AuthStrategy : uint32_t {
@@ -33,11 +36,11 @@ enum AuthStrategy : uint32_t {
 };
 
 namespace AuthFlags {
-enum Type : uint32_t {
-    None = 0,
-    Bech32InSource = 1 << 1,
-    PKHashInSource = 1 << 2,
-};
+    enum Type : uint32_t {
+        None = 0,
+        Bech32InSource = 1 << 1,
+        PKHashInSource = 1 << 2,
+    };
 }
 
 Res HasAuth(const CTransaction &tx,
@@ -49,28 +52,11 @@ Res GetERC55AddressFromAuth(const CTransaction &tx, const CCoinsViewCache &coins
 
 class CCustomTxVisitor {
 protected:
-    uint32_t height;
-    CCustomCSView &mnview;
-    const CTransaction &tx;
-    const CCoinsViewCache &coins;
-    const Consensus::Params &consensus;
-    const uint64_t time;
-    const uint32_t txn;
-    const std::shared_ptr<CScopedTemplateID> &evmTemplateId;
-    bool isEvmEnabledForBlock;
-    bool evmPreValidate;
+    BlockContext &blockCtx;
+    const TransactionContext &txCtx;
 
 public:
-    CCustomTxVisitor(const CTransaction &tx,
-                     uint32_t height,
-                     const CCoinsViewCache &coins,
-                     CCustomCSView &mnview,
-                     const Consensus::Params &consensus,
-                     const uint64_t time,
-                     const uint32_t txn,
-                     const std::shared_ptr<CScopedTemplateID> &evmTemplateId,
-                     const bool isEvmEnabledForBlock,
-                     const bool evmPreValidate);
+    CCustomTxVisitor(BlockContext &blockCtx, const TransactionContext &txCtx);
 
 protected:
     Res HasAuth(const CScript &auth) const;
@@ -93,6 +79,24 @@ protected:
                                               const CBalances &collaterals,
                                               bool useNextPrice,
                                               bool requireLivePrice) const;
+};
+
+class AuthManager {
+    std::optional<Res> foundationAuth;
+    std::optional<Res> governanceAuth;
+    BlockContext &blockCtx;
+    const TransactionContext &txCtx;
+
+public:
+    AuthManager(BlockContext &blockCtx, const TransactionContext &txCtx)
+        : blockCtx(blockCtx),
+          txCtx(txCtx){};
+
+    Res HasFoundationAuth();
+    Res HasGovernanceAuth();
+    Res HasGovOrFoundationAuth();
+    Res CanSetGov(const std::vector<std::string> &keys);
+    Res CanSetGov(const ATTRIBUTES &var);
 };
 
 #endif  // DEFI_DFI_CONSENSUS_TXVISITOR_H

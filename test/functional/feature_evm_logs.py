@@ -37,7 +37,6 @@ class EVMTestLogs(DefiTestFramework):
                 "-grandcentralheight=101",
                 "-metachainheight=105",
                 "-subsidytest=1",
-                "-txindex=1",
             ],
         ]
 
@@ -78,6 +77,7 @@ class EVMTestLogs(DefiTestFramework):
                         "amount": "50@DFI",
                         "domain": 3,
                     },
+                    "singlekeycheck": False,
                 }
             ]
         )
@@ -114,6 +114,7 @@ class EVMTestLogs(DefiTestFramework):
         tx = self.contract.functions.store(10).build_transaction(
             {
                 "chainId": node.w3.eth.chain_id,
+                "from": self.evm_key_pair.address,
                 "nonce": node.w3.eth.get_transaction_count(self.evm_key_pair.address),
                 "gasPrice": 10_000_000_000,
             }
@@ -153,6 +154,7 @@ class EVMTestLogs(DefiTestFramework):
                         "amount": "50@DFI",
                         "domain": 3,
                     },
+                    "singlekeycheck": False,
                 }
             ]
         )

@@ -1,6 +1,7 @@
 #ifndef DEFI_DFI_EVM_H
 #define DEFI_DFI_EVM_H
 
+#include <ain_rs_exports.h>
 #include <amount.h>
 #include <dfi/consensus/xvm.h>
 #include <dfi/res.h>
@@ -8,8 +9,6 @@
 #include <script/script.h>
 #include <serialize.h>
 #include <uint256.h>
-
-constexpr const uint16_t EVM_TX_SIZE = 32768;
 
 // EIP-2718 transaction type: legacy - 0x0, EIP2930 - 0x1, EIP1559 - 0x2
 enum CEVMTxType {
@@ -56,19 +55,20 @@ public:
     };
 };
 
-class CScopedTemplateID {
-    explicit CScopedTemplateID(uint64_t id);
+class CScopedTemplate {
+    explicit CScopedTemplate(BlockTemplateWrapper &blockTemplate);
 
-    uint64_t evmTemplateId;
+    BlockTemplateWrapper &evmTemplate;
 
 public:
-    static std::shared_ptr<CScopedTemplateID> Create(const uint64_t dvmBlockNumber,
-                                                     std::string minerAddress,
-                                                     unsigned int difficulty,
-                                                     const uint64_t timestamp);
-    ~CScopedTemplateID();
+    static std::shared_ptr<CScopedTemplate> Create(const uint64_t dvmBlockNumber,
+                                                   std::string minerAddress,
+                                                   unsigned int difficulty,
+                                                   const uint64_t timestamp,
+                                                   const std::size_t mnview_ptr);
+    ~CScopedTemplate();
 
-    uint64_t GetTemplateID() const;
+    BlockTemplateWrapper &GetTemplate() const;
 };
 
 #endif  // DEFI_DFI_EVM_H

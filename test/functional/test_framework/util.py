@@ -15,6 +15,7 @@ import random
 import re
 from subprocess import CalledProcessError
 import time
+import web3
 
 from . import coverage
 from .authproxy import AuthServiceProxy, JSONRPCException
@@ -67,9 +68,14 @@ def assert_raises_web3_error(code, message, fun, *args, **kwargs):
         fun(*args, **kwargs)
     except ValueError as e:
         assert_equal(e.args[0]["code"], code)
-
         if message not in e.args[0]["message"]:
             raise AssertionError("Expected substring not found:" + e.args[0]["message"])
+    except web3.exceptions.ContractLogicError as e:
+        assert_equal(message, e.message)
+    except Exception as e:
+        raise AssertionError("Unexpected exception raised: " + type(e).__name__)
+    else:
+        raise AssertionError("No exception raised")
 
 
 def assert_raises_message(exc, message, fun, *args, **kwds):
@@ -773,19 +779,18 @@ def find_spendable_utxo(node, min_value):
     raise AssertionError("Unspent output equal or higher than %s not found" % min_value)
 
 
-def fund_tx(node, address, amount):
+def create_address_utxo(node, address, amount):
     """
     Create and send new utxo of the specified amount to address.
     """
-    missing_auth_tx = node.sendtoaddress(address, amount)
-    count, missing_input_vout = 0, 0
-    for vout in node.getrawtransaction(missing_auth_tx, 1)["vout"]:
-        if vout["scriptPubKey"]["addresses"][0] == address:
-            missing_input_vout = count
+    tx = node.sendtoaddress(address, amount)
+    output_num = 0
+    for details in node.gettransaction(tx)["details"]:
+        if details["address"] == address:
+            output_num = details["vout"]
             break
-        count += 1
     node.generate(1)
-    return missing_auth_tx, missing_input_vout
+    return tx, output_num
 
 
 def create_lots_of_big_transactions(node, txouts, utxos, num, fee):
@@ -817,7 +822,7 @@ def create_lots_of_big_transactions(node, txouts, utxos, num, fee):
 
 def mine_large_block(node, utxos=None):
     """
-    Generate a ~1M transaction, and 16 of them will be close to the the 16MB block limit.
+    Generate a ~1M transaction, and 16 of them will be close to the 16MB block limit.
     """
     num = 16  # old value 14
 

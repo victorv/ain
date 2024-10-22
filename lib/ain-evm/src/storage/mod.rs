@@ -1,21 +1,18 @@
 pub mod block_store;
 mod cache;
 mod db;
+mod migration;
 pub mod traits;
 
 use std::{collections::HashMap, path::Path};
 
-use ain_cpp_imports::Attributes;
 use ethereum::{BlockAny, TransactionV2};
 use ethereum_types::{H160, H256, U256};
 
 use self::{
     block_store::{BlockStore, DumpArg},
     cache::Cache,
-    traits::{
-        AttributesStorage, BlockStorage, FlushableStorage, ReceiptStorage, Rollback,
-        TransactionStorage,
-    },
+    traits::{BlockStorage, FlushableStorage, ReceiptStorage, Rollback, TransactionStorage},
 };
 use crate::{log::LogIndex, receipt::Receipt, storage::traits::LogStorage, Result};
 
@@ -71,7 +68,6 @@ impl BlockStorage for Storage {
     }
 
     fn put_block(&self, block: &BlockAny) -> Result<()> {
-        self.cache.put_block(block)?;
         self.blockstore.put_block(block)
     }
 
@@ -96,11 +92,8 @@ impl BlockStorage for Storage {
 }
 
 impl TransactionStorage for Storage {
-    fn extend_transactions_from_block(&self, block: &BlockAny) -> Result<()> {
-        // Feature flag
-        self.cache.extend_transactions_from_block(block)?;
-
-        self.blockstore.extend_transactions_from_block(block)
+    fn put_transactions_from_block(&self, block: &BlockAny) -> Result<()> {
+        self.blockstore.put_transactions_from_block(block)
     }
 
     fn get_transaction_by_hash(&self, hash: &H256) -> Result<Option<TransactionV2>> {
@@ -162,11 +155,6 @@ impl TransactionStorage for Storage {
             Err(e) => Err(e),
         }
     }
-
-    fn put_transaction(&self, transaction: &TransactionV2) -> Result<()> {
-        self.cache.put_transaction(transaction)?;
-        self.blockstore.put_transaction(transaction)
-    }
 }
 
 impl ReceiptStorage for Storage {
@@ -196,19 +184,39 @@ impl FlushableStorage for Storage {
 }
 
 impl Storage {
-    pub fn get_code_by_hash(&self, hash: H256) -> Result<Option<Vec<u8>>> {
-        self.blockstore.get_code_by_hash(&hash)
+    pub fn get_code_by_hash(&self, address: H160, hash: H256) -> Result<Option<Vec<u8>>> {
+        match self.cache.get_code_by_hash(&hash) {
+            Ok(Some(code)) => Ok(Some(code)),
+            Ok(None) => {
+                let code = self.blockstore.get_code_by_hash(address, &hash);
+                if let Ok(Some(ref code)) = code {
+                    self.cache.put_code(hash, code)?;
+                }
+                code
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    pub fn put_code(&self, hash: H256, code: Vec<u8>) -> Result<()> {
-        self.blockstore.put_code(&hash, &code)
+    pub fn put_code(
+        &self,
+        block_number: U256,
+        address: H160,
+        hash: H256,
+        code: Vec<u8>,
+    ) -> Result<()> {
+        self.blockstore
+            .put_code(block_number, address, &hash, &code)
     }
 }
 
 impl Storage {
-    pub fn dump_db(&self, arg: DumpArg, from: Option<&str>, limit: usize) {
-        println!("[dump_db]");
+    pub fn dump_db(&self, arg: DumpArg, from: Option<&str>, limit: usize) -> Result<String> {
         self.blockstore.dump(&arg, from, limit)
+    }
+
+    pub fn hash_db_state(&self) -> Result<String> {
+        self.blockstore.hash_db_state()
     }
 }
 
@@ -216,32 +224,5 @@ impl Rollback for Storage {
     fn disconnect_latest_block(&self) -> Result<()> {
         self.cache.disconnect_latest_block()?;
         self.blockstore.disconnect_latest_block()
-    }
-}
-
-impl AttributesStorage for Storage {
-    fn put_attributes(&self, attributes: Option<&Attributes>) -> Result<()> {
-        self.cache.put_attributes(attributes)?;
-        // self.blockstore.put_attributes(attributes)?;
-        Ok(())
-    }
-
-    fn get_attributes(&self) -> Result<Option<Attributes>> {
-        // let attributes = self.cache.get_attributes().or_else(|_| {
-        //     let attributes = self.blockstore.get_attributes();
-        //     if let Ok(Some(ref attr)) = attributes {
-        //         self.cache.put_attributes(Some(attr))?;
-        //     }
-        //     attributes
-        // })?;
-        // Ok(attributes)
-        Ok(None)
-    }
-}
-
-impl Storage {
-    pub fn get_attributes_or_default(&self) -> Result<Attributes> {
-        self.get_attributes()
-            .map(|attributes| attributes.unwrap_or_else(ain_cpp_imports::get_attribute_defaults))
     }
 }

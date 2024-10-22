@@ -5,6 +5,7 @@
 #include <consensus/params.h>
 #include <dfi/consensus/oracles.h>
 #include <dfi/masternodes.h>
+#include <dfi/mn_checks.h>
 
 Res COraclesConsensus::NormalizeTokenCurrencyPair(std::set<CTokenCurrencyPair> &tokenCurrency) const {
     std::set<CTokenCurrencyPair> trimmed;
@@ -21,9 +22,14 @@ Res COraclesConsensus::NormalizeTokenCurrencyPair(std::set<CTokenCurrencyPair> &
 }
 
 Res COraclesConsensus::operator()(const CAppointOracleMessage &obj) const {
-    if (!HasFoundationAuth()) {
-        return Res::Err("tx not from foundation member");
+    auto authCheck = AuthManager(blockCtx, txCtx);
+    if (auto res = authCheck.HasGovOrFoundationAuth(); !res) {
+        return res;
     }
+
+    const auto &tx = txCtx.GetTransaction();
+    auto &mnview = blockCtx.GetView();
+
     COracle oracle;
     static_cast<CAppointOracleMessage &>(oracle) = obj;
     auto res = NormalizeTokenCurrencyPair(oracle.availablePairs);
@@ -31,9 +37,13 @@ Res COraclesConsensus::operator()(const CAppointOracleMessage &obj) const {
 }
 
 Res COraclesConsensus::operator()(const CUpdateOracleAppointMessage &obj) const {
-    if (!HasFoundationAuth()) {
-        return Res::Err("tx not from foundation member");
+    auto authCheck = AuthManager(blockCtx, txCtx);
+    if (auto res = authCheck.HasGovOrFoundationAuth(); !res) {
+        return res;
     }
+
+    auto &mnview = blockCtx.GetView();
+
     COracle oracle;
     static_cast<CAppointOracleMessage &>(oracle) = obj.newOracleAppoint;
     if (auto res = NormalizeTokenCurrencyPair(oracle.availablePairs); !res) {
@@ -43,14 +53,22 @@ Res COraclesConsensus::operator()(const CUpdateOracleAppointMessage &obj) const 
 }
 
 Res COraclesConsensus::operator()(const CRemoveOracleAppointMessage &obj) const {
-    if (auto res = HasFoundationAuth(); !res) {
+    auto authCheck = AuthManager(blockCtx, txCtx);
+    if (auto res = authCheck.HasGovOrFoundationAuth(); !res) {
         return res;
     }
+
+    auto &mnview = blockCtx.GetView();
 
     return mnview.RemoveOracle(obj.oracleId);
 }
 
 Res COraclesConsensus::operator()(const CSetOracleDataMessage &obj) const {
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    const auto time = txCtx.GetTime();
+    auto &mnview = blockCtx.GetView();
+
     auto oracle = mnview.GetOracleData(obj.oracleId);
     if (!oracle) {
         return Res::Err("failed to retrieve oracle <%s> from database", obj.oracleId.GetHex());

@@ -11,6 +11,7 @@
 #include <dfi/govvariables/attributes.h>
 #include <dfi/masternodes.h>
 #include <dfi/mn_checks.h>
+#include <dfi/validation.h>
 #include <ffi/cxx.h>
 
 constexpr uint32_t MAX_TRANSFERDOMAIN_EVM_DATA_LEN = 1024;
@@ -22,7 +23,6 @@ static bool IsTransferDomainEnabled(const int height, const CCustomCSView &view,
 
     const CDataStructureV0 enabledKey{AttributeTypes::Param, ParamIDs::Feature, DFIPKeys::TransferDomain};
     auto attributes = view.GetAttributes();
-    assert(attributes);
     return attributes->GetValue(enabledKey, false);
 }
 
@@ -65,7 +65,7 @@ static Res ValidateTransferDomainScripts(const CScript &srcScript,
         if (!config.dvmToEvmDestAddresses.count(destType)) {
             return DeFiErrors::TransferDomainETHDestAddress();
         }
-        context.to = EncodeDestination(dest);
+        context.to = CKeyID::FromOrDefaultDestination(dest).GetByteArray();
         context.native_address = EncodeDestination(src);
         return Res::Ok();
 
@@ -76,7 +76,7 @@ static Res ValidateTransferDomainScripts(const CScript &srcScript,
         if (!config.evmToDvmDestAddresses.count(destType)) {
             return DeFiErrors::TransferDomainDVMDestAddress();
         }
-        context.from = EncodeDestination(src);
+        context.from = CKeyID::FromOrDefaultDestination(src).GetByteArray();
         context.native_address = EncodeDestination(dest);
         return Res::Ok();
     }
@@ -86,12 +86,11 @@ static Res ValidateTransferDomainScripts(const CScript &srcScript,
 
 static Res ValidateTransferDomainEdge(const CTransaction &tx,
                                       const TransferDomainConfig &config,
-                                      CCustomCSView &mnview,
-                                      uint32_t height,
+                                      const CCustomCSView &mnview,
+                                      const uint32_t height,
                                       const CCoinsViewCache &coins,
-                                      const Consensus::Params &consensus,
-                                      CTransferDomainItem src,
-                                      CTransferDomainItem dst,
+                                      const CTransferDomainItem &src,
+                                      const CTransferDomainItem &dst,
                                       TransferDomainInfo &context) {
     if (src.domain == dst.domain) {
         return DeFiErrors::TransferDomainSameDomain();
@@ -151,7 +150,7 @@ static Res ValidateTransferDomainEdge(const CTransaction &tx,
         if (!ExtractDestination(from, dest)) {
             return DeFiErrors::ScriptUnexpected(from);
         }
-        context.from = EncodeDestination(dest);
+        context.from = CKeyID::FromOrDefaultDestination(dest).GetByteArray();
 
         return HasAuth(tx, coins, src.address);
 
@@ -192,7 +191,7 @@ static Res ValidateTransferDomainEdge(const CTransaction &tx,
 static Res ValidateTransferDomain(const CTransaction &tx,
                                   uint32_t height,
                                   const CCoinsViewCache &coins,
-                                  CCustomCSView &mnview,
+                                  const CCustomCSView &mnview,
                                   const Consensus::Params &consensus,
                                   const CTransferDomainMessage &obj,
                                   const bool isEvmEnabledForBlock,
@@ -217,7 +216,7 @@ static Res ValidateTransferDomain(const CTransaction &tx,
 
     for (const auto &[src, dst] : obj.transfers) {
         TransferDomainInfo context;
-        auto res = ValidateTransferDomainEdge(tx, config, mnview, height, coins, consensus, src, dst, context);
+        auto res = ValidateTransferDomainEdge(tx, config, mnview, height, coins, src, dst, context);
         if (!res) {
             return res;
         }
@@ -228,6 +227,15 @@ static Res ValidateTransferDomain(const CTransaction &tx,
 }
 
 Res CXVMConsensus::operator()(const CTransferDomainMessage &obj) const {
+    const auto &coins = txCtx.GetCoins();
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    const auto &tx = txCtx.GetTransaction();
+    const auto isEvmEnabledForBlock = blockCtx.GetEVMEnabledForBlock();
+    const auto &evmTemplate = blockCtx.GetEVMTemplate();
+    const auto evmPreValidate = blockCtx.GetEVMPreValidate();
+    auto &mnview = blockCtx.GetView();
+
     std::vector<TransferDomainInfo> contexts;
     auto res = ValidateTransferDomain(tx, height, coins, mnview, consensus, obj, isEvmEnabledForBlock, contexts);
     if (!res) {
@@ -254,7 +262,7 @@ Res CXVMConsensus::operator()(const CTransferDomainMessage &obj) const {
 
             // Check if destination address is a contract
             auto isSmartContract = evm_try_unsafe_is_smart_contract_in_template(
-                result, toAddress->GetHex(), evmTemplateId->GetTemplateID());
+                result, toAddress->GetByteArray(), evmTemplate->GetTemplate());
             if (!result.ok) {
                 return Res::Err("Error checking contract address: %s", result.reason);
             }
@@ -283,7 +291,7 @@ Res CXVMConsensus::operator()(const CTransferDomainMessage &obj) const {
             }
             const auto evmTx = HexStr(dst.data);
             evm_try_unsafe_validate_transferdomain_tx_in_template(
-                result, evmTemplateId->GetTemplateID(), evmTx, contexts[idx]);
+                result, evmTemplate->GetTemplate(), evmTx, contexts[idx]);
             if (!result.ok) {
                 return Res::Err("transferdomain evm tx failed to pre-validate : %s", result.reason);
             }
@@ -295,18 +303,18 @@ Res CXVMConsensus::operator()(const CTransferDomainMessage &obj) const {
             if (!result.ok) {
                 return Res::Err("Error getting tx hash: %s", result.reason);
             }
-            evmTxHash = std::string(hash.data(), hash.length()).substr(2);
+            evmTxHash = uint256::FromByteArray(hash).GetHex();
             // Add balance to ERC55 address
             auto tokenId = dst.amount.nTokenId;
             if (tokenId == DCT_ID{0}) {
                 evm_try_unsafe_add_balance_in_template(
-                    result, evmTemplateId->GetTemplateID(), evmTx, tx.GetHash().GetHex());
+                    result, evmTemplate->GetTemplate(), evmTx, tx.GetHash().GetByteArray());
                 if (!result.ok) {
                     return Res::Err("Error bridging DFI: %s", result.reason);
                 }
             } else {
                 evm_try_unsafe_bridge_dst20(
-                    result, evmTemplateId->GetTemplateID(), evmTx, tx.GetHash().GetHex(), tokenId.v, true);
+                    result, evmTemplate->GetTemplate(), evmTx, tx.GetHash().GetByteArray(), tokenId.v, true);
                 if (!result.ok) {
                     return Res::Err("Error bridging DST20: %s", result.reason);
                 }
@@ -327,7 +335,7 @@ Res CXVMConsensus::operator()(const CTransferDomainMessage &obj) const {
 
             // Check if source address is a contract
             auto isSmartContract = evm_try_unsafe_is_smart_contract_in_template(
-                result, fromAddress->GetHex(), evmTemplateId->GetTemplateID());
+                result, fromAddress->GetByteArray(), evmTemplate->GetTemplate());
             if (!result.ok) {
                 return Res::Err("Error checking contract address: %s", result.reason);
             }
@@ -340,7 +348,7 @@ Res CXVMConsensus::operator()(const CTransferDomainMessage &obj) const {
             }
             const auto evmTx = HexStr(src.data);
             evm_try_unsafe_validate_transferdomain_tx_in_template(
-                result, evmTemplateId->GetTemplateID(), evmTx, contexts[idx]);
+                result, evmTemplate->GetTemplate(), evmTx, contexts[idx]);
             if (!result.ok) {
                 return Res::Err("transferdomain evm tx failed to pre-validate %s", result.reason);
             }
@@ -352,13 +360,13 @@ Res CXVMConsensus::operator()(const CTransferDomainMessage &obj) const {
             if (!result.ok) {
                 return Res::Err("Error getting tx hash: %s", result.reason);
             }
-            evmTxHash = std::string(hash.data(), hash.length()).substr(2);
+            evmTxHash = uint256::FromByteArray(hash).GetHex();
 
             // Subtract balance from ERC55 address
             auto tokenId = dst.amount.nTokenId;
             if (tokenId == DCT_ID{0}) {
                 if (!evm_try_unsafe_sub_balance_in_template(
-                        result, evmTemplateId->GetTemplateID(), evmTx, tx.GetHash().GetHex())) {
+                        result, evmTemplate->GetTemplate(), evmTx, tx.GetHash().GetByteArray())) {
                     return DeFiErrors::TransferDomainNotEnoughBalance(EncodeDestination(dest));
                 }
                 if (!result.ok) {
@@ -366,7 +374,7 @@ Res CXVMConsensus::operator()(const CTransferDomainMessage &obj) const {
                 }
             } else {
                 evm_try_unsafe_bridge_dst20(
-                    result, evmTemplateId->GetTemplateID(), evmTx, tx.GetHash().GetHex(), tokenId.v, false);
+                    result, evmTemplate->GetTemplate(), evmTx, tx.GetHash().GetByteArray(), tokenId.v, false);
                 if (!result.ok) {
                     return Res::Err("Error bridging DST20: %s", result.reason);
                 }
@@ -375,11 +383,29 @@ Res CXVMConsensus::operator()(const CTransferDomainMessage &obj) const {
             stats.evmOut.Add(tokenAmount);
             stats.evmCurrent.Sub(tokenAmount);
 
+            auto destAmount = dst.amount;
+
+            // Process TokenSplit
+            if (height >= consensus.DF23Height) {
+                bool needToLock = false;
+                res = ExecuteTokenMigrationTransferDomain(mnview, destAmount, needToLock);
+                if (!res) {
+                    return res;
+                }
+                // Process TokenLock
+                if (needToLock && height >= consensus.DF24Height) {
+                    res = ExecuteLockTransferDomain(mnview, height, tx.GetHash(), dst.address, destAmount);
+                    if (!res) {
+                        return res;
+                    }
+                }
+            }
+
             // Add balance to DFI address
-            res = mnview.AddBalance(dst.address, dst.amount);
+            res = mnview.AddBalance(dst.address, destAmount);
             if (!res) {
                 evm_try_unsafe_remove_txs_above_hash_in_template(
-                    result, evmTemplateId->GetTemplateID(), tx.GetHash().GetHex());
+                    result, evmTemplate->GetTemplate(), tx.GetHash().GetByteArray());
                 return res;
             }
             stats.evmDvmTotal.Add(dst.amount);
@@ -405,24 +431,27 @@ Res CXVMConsensus::operator()(const CTransferDomainMessage &obj) const {
     attributes->SetValue(CTransferDomainStatsLive::Key, stats);
     res = mnview.SetVariable(*attributes);
     if (!res) {
-        evm_try_unsafe_remove_txs_above_hash_in_template(result, evmTemplateId->GetTemplateID(), tx.GetHash().GetHex());
+        evm_try_unsafe_remove_txs_above_hash_in_template(
+            result, evmTemplate->GetTemplate(), tx.GetHash().GetByteArray());
         return res;
     }
     return Res::Ok();
 }
 
 Res CXVMConsensus::operator()(const CEvmTxMessage &obj) const {
+    const auto &tx = txCtx.GetTransaction();
+    const auto isEvmEnabledForBlock = blockCtx.GetEVMEnabledForBlock();
+    const auto &evmTemplate = blockCtx.GetEVMTemplate();
+    const auto evmPreValidate = blockCtx.GetEVMPreValidate();
+    auto &mnview = blockCtx.GetView();
+
     if (!isEvmEnabledForBlock) {
         return Res::Err("Cannot create tx, EVM is not enabled");
     }
 
-    if (obj.evmTx.size() > static_cast<size_t>(EVM_TX_SIZE)) {
-        return Res::Err("evm tx size too large");
-    }
-
     CrossBoundaryResult result;
     if (evmPreValidate) {
-        evm_try_unsafe_validate_raw_tx_in_template(result, evmTemplateId->GetTemplateID(), HexStr(obj.evmTx));
+        evm_try_unsafe_validate_raw_tx_in_template(result, evmTemplate->GetTemplate(), HexStr(obj.evmTx));
         if (!result.ok) {
             return Res::Err("evm tx failed to pre-validate %s", result.reason);
         }
@@ -430,14 +459,14 @@ Res CXVMConsensus::operator()(const CEvmTxMessage &obj) const {
     }
 
     const auto validateResults = evm_try_unsafe_push_tx_in_template(
-        result, evmTemplateId->GetTemplateID(), HexStr(obj.evmTx), tx.GetHash().GetHex());
+        result, evmTemplate->GetTemplate(), HexStr(obj.evmTx), tx.GetHash().GetByteArray());
     if (!result.ok) {
         LogPrintf("[evm_try_push_tx_in_template] failed, reason : %s\n", result.reason);
         return Res::Err("evm tx failed to queue %s\n", result.reason);
     }
 
     auto txHash = tx.GetHash().GetHex();
-    auto evmTxHash = std::string(validateResults.tx_hash.data(), validateResults.tx_hash.length()).substr(2);
+    auto evmTxHash = uint256::FromByteArray(validateResults.tx_hash).GetHex();
     auto res = mnview.SetVMDomainTxEdge(VMDomainEdge::DVMToEVM, txHash, evmTxHash);
     if (!res) {
         LogPrintf("Failed to store DVMtoEVM TX hash for DFI TX %s\n", txHash);

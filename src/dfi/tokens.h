@@ -13,7 +13,9 @@
 #include <script/script.h>
 #include <serialize.h>
 #include <uint256.h>
+#include <validation.h>
 
+class BlockContext;
 class CTransaction;
 class UniValue;
 
@@ -22,16 +24,20 @@ public:
     static const uint8_t MAX_TOKEN_NAME_LENGTH = 128;
     static const uint8_t MAX_TOKEN_SYMBOL_LENGTH = 8;
     static const uint8_t MAX_TOKEN_POOLPAIR_LENGTH = 16;
+    static const uint8_t POST_METACHAIN_TOKEN_NAME_BYTE_SIZE = 30;
     enum class TokenFlags : uint8_t {
         None = 0,
         Mintable = 0x01,
         Tradeable = 0x02,
         DAT = 0x04,
-        LPS = 0x08,        // Liquidity Pool Share
-        Finalized = 0x10,  // locked forever
-        LoanToken = 0x20,  // token created for loan
+        LPS = 0x08,         // Liquidity Pool Share
+        Finalized = 0x10,   // locked forever
+        LoanToken = 0x20,   // token created for loan
+        Deprecated = 0x40,  // token is deprecated
         Default = TokenFlags::Mintable | TokenFlags::Tradeable
     };
+
+    static std::string DeprecationPrefix() { return "eol/"; }
 
     //! basic properties
     std::string symbol;
@@ -54,6 +60,7 @@ public:
     inline bool IsPoolShare() const { return flags & (uint8_t)TokenFlags::LPS; }
     inline bool IsFinalized() const { return flags & (uint8_t)TokenFlags::Finalized; }
     inline bool IsLoanToken() const { return flags & (uint8_t)TokenFlags::LoanToken; }
+    inline bool IsDeprecated() const { return flags & (uint8_t)TokenFlags::Deprecated; }
     inline std::string CreateSymbolKey(DCT_ID const &id) const {
         return symbol + (IsDAT() ? "" : "#" + std::to_string(id.v));
     }
@@ -95,12 +102,17 @@ struct CUpdateTokenPreAMKMessage {
 struct CUpdateTokenMessage {
     uint256 tokenTx;
     CToken token;
+    bool newCollateralAddress;
 
     ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream &s, Operation ser_action) {
         READWRITE(tokenTx);
         READWRITE(token);
+
+        if (!s.eof()) {
+            READWRITE(newCollateralAddress);
+        }
     }
 };
 
@@ -178,27 +190,43 @@ public:
     }
 };
 
+struct UpdateTokenContext {
+    CTokenImplementation &newToken;
+    BlockContext &blockCtx;
+    const bool checkFinalised{};
+    const bool tokenSplitUpdate{};
+    const bool checkSymbol{};
+    const uint256 hash{};
+};
+
 class CTokensView : public virtual CStorageView {
 public:
     static const DCT_ID DCT_ID_START;            // = 128;
     static const unsigned char DB_TOKEN_LASTID;  // = 'L';
 
+    using SplitMultiplier = std::variant<int32_t, CAmount>;
+
     using CTokenImpl = CTokenImplementation;
+    using TokenIDPair = std::pair<DCT_ID, std::optional<CTokenImpl>>;
     std::optional<CTokenImpl> GetToken(DCT_ID id) const;
-    std::optional<std::pair<DCT_ID, std::optional<CTokensView::CTokenImpl>>> GetToken(const std::string &symbol) const;
+    std::optional<CTokensView::TokenIDPair> GetToken(const std::string &symbol) const;
     // the only possible type of token (with creationTx) is CTokenImpl
     std::optional<std::pair<DCT_ID, CTokenImpl>> GetTokenByCreationTx(const uint256 &txid) const;
     [[nodiscard]] virtual std::optional<CTokenImpl> GetTokenGuessId(const std::string &str, DCT_ID &id) const = 0;
+    void SetTokenSplitMultiplier(const uint32_t oldId, const uint32_t newId, const SplitMultiplier multiplier);
+    [[nodiscard]] std::optional<std::pair<uint32_t, SplitMultiplier>> GetTokenSplitMultiplier(const uint32_t id) const;
 
     void ForEachToken(std::function<bool(DCT_ID const &, CLazySerialize<CTokenImpl>)> callback,
                       DCT_ID const &start = DCT_ID{0});
 
+    void SetNewTokenCollateral(const uint256 &txid, const uint32_t tokenID);
+    [[nodiscard]] bool NewTokenCollateralExists(const uint256 &txid) const;
+    [[nodiscard]] uint256 GetNewTokenCollateralTXID(const uint32_t tokenID) const;
+    void EraseNewTokenCollateral(const uint32_t tokenID);
+
     Res CreateDFIToken();
-    ResVal<DCT_ID> CreateToken(const CTokenImpl &token,
-                               bool isPreBayfront = false,
-                               bool shouldCreateDst20 = false,
-                               const std::shared_ptr<CScopedTemplateID> &evmTemplateId = {});
-    Res UpdateToken(const CTokenImpl &newToken, bool isPreBayfront = false, const bool tokenSplitUpdate = false);
+    ResVal<DCT_ID> CreateToken(const CTokenImpl &token, BlockContext &blockCtx, bool isPreBayfront = false);
+    Res UpdateToken(UpdateTokenContext &ctx);
 
     Res BayfrontFlagsCleanup();
     Res AddMintedTokens(DCT_ID const &id, const CAmount &amount);
@@ -217,10 +245,20 @@ public:
     struct LastDctId {
         static constexpr uint8_t prefix() { return 'L'; }
     };
+    struct TokenSplitMultiplier {
+        static constexpr uint8_t prefix() { return 'n'; }
+    };
+    struct NewTokenCollateralTXID {
+        static constexpr uint8_t prefix() { return 0x7C; }
+    };
+    struct NewTokenCollateralID {
+        static constexpr uint8_t prefix() { return 0x7D; }
+    };
+
+    DCT_ID IncrementLastDctId();
 
 private:
     // have to incapsulate "last token id" related methods here
-    DCT_ID IncrementLastDctId();
     std::optional<DCT_ID> ReadLastDctId() const;
 };
 

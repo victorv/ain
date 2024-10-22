@@ -4325,14 +4325,14 @@ bool CWallet::Verify(interfaces::Chain& chain, const WalletLocation& location, b
     LOCK(cs_wallets);
     const fs::path& wallet_path = location.GetPath();
     fs::file_type path_type = fs::symlink_status(wallet_path).type();
-    if (!(path_type == fs::file_not_found || path_type == fs::directory_file ||
-          (path_type == fs::symlink_file && fs::is_directory(wallet_path)) ||
-          (path_type == fs::regular_file && fs::path(location.GetName()).filename() == location.GetName()))) {
+    if (!(path_type == fs::file_type::not_found || path_type == fs::file_type::directory ||
+          (path_type == fs::file_type::symlink && fs::is_directory(wallet_path)) ||
+          (path_type == fs::file_type::regular && fs::PathFromString(location.GetName()).filename() == fs::PathFromString(location.GetName())))) {
         error_string = strprintf(
               "Invalid -wallet path '%s'. -wallet path should point to a directory where wallet.dat and "
               "database/log.?????????? files can be stored, a location where such a directory could be created, "
               "or (for backwards compatibility) the name of an existing data file in -walletdir (%s)",
-              location.GetName(), GetWalletDir());
+              location.GetName(), fs::quoted(fs::PathToString(GetWalletDir())));
         return false;
     }
 
@@ -4368,7 +4368,7 @@ bool CWallet::Verify(interfaces::Chain& chain, const WalletLocation& location, b
 
 std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(interfaces::Chain& chain, const WalletLocation& location, uint64_t wallet_creation_flags)
 {
-    const std::string& walletFile = WalletDataFilePath(location.GetPath()).string();
+    const std::string& walletFile = fs::PathToString(WalletDataFilePath(location.GetPath()));
 
     // needed to restore wallet transaction meta data after -zapwallettxes
     std::vector<CWalletTx> vWtx;
@@ -4961,8 +4961,7 @@ bool CWallet::GetKey(const CKeyID &address, CKey& keyOut) const
 bool CWallet::GetWatchPubKey(const CKeyID &address, CPubKey &pubkey_out) const
 {
     LOCK(cs_KeyStore);
-    WatchKeyMap::const_iterator it = mapWatchKeys.find(address);
-    if (it != mapWatchKeys.end()) {
+    if (const auto it = mapWatchKeys.find(address); it != mapWatchKeys.end()) {
         pubkey_out = it->second;
         return true;
     }
@@ -4979,10 +4978,10 @@ bool CWallet::GetPubKey(const CKeyID &address, CPubKey& vchPubKeyOut) const
         return true;
     }
 
-    CryptedKeyMap::const_iterator mi = mapCryptedKeys.find(address);
-    if (mi != mapCryptedKeys.end())
+    if (const auto mi = mapCryptedKeys.find(address); mi != mapCryptedKeys.end())
     {
         vchPubKeyOut = (*mi).second.first;
+        ResolveKeyCompression(address.type, vchPubKeyOut);
         return true;
     }
     // Check for watch-only pubkeys

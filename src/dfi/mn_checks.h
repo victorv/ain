@@ -15,6 +15,7 @@
 
 #include <variant>
 
+class BlockContext;
 class CTransaction;
 class CTxMemPool;
 class CCoinsViewCache;
@@ -26,7 +27,7 @@ struct EVM {
     std::string blockHash;
     uint64_t burntFee;
     uint64_t priorityFee;
-    EvmAddressData beneficiary;
+    std::string beneficiary;
 
     ADD_SERIALIZE_METHODS;
 
@@ -121,6 +122,8 @@ using CCustomTxMessage = std::variant<CCustomTxMessageNone,
                                       CFutureSwapMessage,
                                       CGovernanceMessage,
                                       CGovernanceUnsetMessage,
+                                      CGovernanceUnsetHeightMessage,
+                                      CGovernanceClearHeightMessage,
                                       CGovernanceHeightMessage,
                                       CAppointOracleMessage,
                                       CRemoveOracleAppointMessage,
@@ -152,39 +155,83 @@ using CCustomTxMessage = std::variant<CCustomTxMessageNone,
                                       CCreateProposalMessage,
                                       CProposalVoteMessage,
                                       CTransferDomainMessage,
-                                      CEvmTxMessage>;
+                                      CEvmTxMessage,
+                                      CReleaseLockMessage>;
+
+class BlockContext {
+    std::shared_ptr<CCustomCSView> cache;
+    CCustomCSView *view;
+    std::optional<bool> isEvmEnabledForBlock;
+    std::shared_ptr<CScopedTemplate> evmTemplate{};
+    bool evmPreValidate{};
+    const uint32_t height{};
+    const uint64_t time{};
+    const Consensus::Params &consensus;
+
+public:
+    explicit BlockContext(const uint32_t height,
+                          const uint64_t time,
+                          const Consensus::Params &consensus,
+                          CCustomCSView *view = {},
+                          const std::optional<bool> enabled = std::nullopt,
+                          const std::shared_ptr<CScopedTemplate> &evmTemplate = {},
+                          const bool prevalidate = {});
+    explicit BlockContext(BlockContext &other, CCustomCSView &otherView);
+
+    [[nodiscard]] CCustomCSView &GetView();
+    [[nodiscard]] bool GetEVMEnabledForBlock();
+    [[nodiscard]] bool GetEVMPreValidate() const;
+    [[nodiscard]] const std::shared_ptr<CScopedTemplate> &GetEVMTemplate() const;
+    [[nodiscard]] const uint32_t &GetHeight() const;
+    [[nodiscard]] const uint64_t &GetTime() const;
+    [[nodiscard]] const Consensus::Params &GetConsensus() const;
+
+    void SetView(CCustomCSView &other);
+    void SetEVMPreValidate(const bool other);
+    void SetEVMTemplate(const std::shared_ptr<CScopedTemplate> &evmTemplate);
+};
+
+class TransactionContext {
+    const CCoinsViewCache &coins;
+    const CTransaction &tx;
+    const Consensus::Params &consensus;
+    const uint32_t &height;
+    const uint64_t &time;
+    const uint32_t txn{};
+
+    std::vector<unsigned char> metadata;
+    std::optional<CustomTxType> txType;
+    std::optional<std::pair<Res, CCustomTxMessage>> txMessageResult;
+    bool metadataValidation{};
+
+public:
+    TransactionContext(const CCoinsViewCache &coins,
+                       const CTransaction &tx,
+                       const BlockContext &blockCtx,
+                       const uint32_t txn = {});
+
+    [[nodiscard]] const CCoinsViewCache &GetCoins() const;
+    [[nodiscard]] const CTransaction &GetTransaction() const;
+    [[nodiscard]] const Consensus::Params &GetConsensus() const;
+    [[nodiscard]] uint32_t GetHeight() const;
+    [[nodiscard]] uint64_t GetTime() const;
+    [[nodiscard]] uint32_t GetTxn() const;
+    [[nodiscard]] CustomTxType GetTxType();
+    [[nodiscard]] std::pair<Res, CCustomTxMessage> &GetTxMessage();
+    [[nodiscard]] bool GetMetadataValidation() const;
+};
 
 CCustomTxMessage customTypeToMessage(CustomTxType txType);
-bool IsMempooledCustomTxCreate(const CTxMemPool &pool, const uint256 &txid);
-Res RpcInfo(const CTransaction &tx, uint32_t height, CustomTxType &type, UniValue &results);
+bool IsMempooledCustomTxCreate(const CTxMemPool &pool, const uint256 &txid, const uint32_t height);
+Res RpcInfo(CCustomCSView &view, const CTransaction &tx, uint32_t height, CustomTxType &type, UniValue &results);
 Res CustomMetadataParse(uint32_t height,
                         const Consensus::Params &consensus,
                         const std::vector<unsigned char> &metadata,
                         CCustomTxMessage &txMessage);
 
-Res ApplyCustomTx(CCustomCSView &mnview,
-                  const CCoinsViewCache &coins,
-                  const CTransaction &tx,
-                  const Consensus::Params &consensus,
-                  uint32_t height,
-                  uint64_t time,
-                  uint256 *canSpend,
-                  uint32_t txn,
-                  std::shared_ptr<CScopedTemplateID> &evmTemplateId,
-                  const bool isEvmEnabledForBlock,
-                  const bool evmPreValidate);
+Res ApplyCustomTx(BlockContext &blockCtx, TransactionContext &txCtx);
 
-Res CustomTxVisit(CCustomCSView &mnview,
-                  const CCoinsViewCache &coins,
-                  const CTransaction &tx,
-                  const uint32_t height,
-                  const Consensus::Params &consensus,
-                  const CCustomTxMessage &txMessage,
-                  const uint64_t time,
-                  const uint32_t txn,
-                  std::shared_ptr<CScopedTemplateID> &evmTemplateId,
-                  const bool isEvmEnabledForBlock,
-                  const bool evmPreValidate);
+Res CustomTxVisit(const CCustomTxMessage &txMessage, BlockContext &blockCtx, const TransactionContext &txCtx);
 
 ResVal<uint256> ApplyAnchorRewardTx(CCustomCSView &mnview,
                                     const CTransaction &tx,
@@ -218,18 +265,25 @@ bool IsMainNetwork();
 bool OraclePriceFeed(CCustomCSView &view, const CTokenCurrencyPair &priceFeed);
 bool CheckOPReturnSize(const CScript &scriptPubKey, const uint32_t opreturnSize);
 
+std::set<CScript> GetFoundationMembers(const CCustomCSView &mnview);
+std::set<CScript> GetGovernanceMembers(const CCustomCSView &mnview);
+
 class CPoolSwap {
     const CPoolSwapMessage &obj;
-    uint32_t height;
-    CAmount result{0};
-    DCT_ID currentID;
+    const uint32_t height;
+    const std::optional<std::pair<CustomTxType, uint256>> txInfo;
+    CAmount result{};
+    DCT_ID currentID{};
 
 public:
     std::vector<std::pair<std::string, std::string>> errors;
 
-    CPoolSwap(const CPoolSwapMessage &obj, uint32_t height)
+    CPoolSwap(const CPoolSwapMessage &obj,
+              const uint32_t height,
+              const std::optional<std::pair<CustomTxType, uint256>> txInfo = std::nullopt)
         : obj(obj),
-          height(height) {}
+          height(height),
+          txInfo(txInfo) {}
 
     std::vector<DCT_ID> CalculateSwaps(CCustomCSView &view, const Consensus::Params &consensus, bool testOnly = false);
     Res ExecuteSwap(CCustomCSView &view,

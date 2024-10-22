@@ -3,21 +3,21 @@
 // file LICENSE or http://www.opensource.org/licenses/mit-license.php.
 
 #include <base58.h>
+#include <dfi/accountshistory.h>
 #include <dfi/consensus/xvm.h>
 #include <dfi/govvariables/attributes.h>
 #include <dfi/mn_rpc.h>
+#include <dfi/vaulthistory.h>
 #include <policy/settings.h>
 #include <regex>
 
 extern bool EnsureWalletIsAvailable(bool avoidException);                // in rpcwallet.cpp
 extern bool DecodeHexTx(CTransaction &tx, const std::string &strHexTx);  // in core_io.h
 
-CAccounts GetAllMineAccounts(CWallet *const pwallet) {
+CAccounts GetAllMineAccounts(CWallet *const pwallet, CCustomCSView &mnview) {
     CAccounts walletAccounts;
 
-    LOCK(cs_main);
-    CCustomCSView mnview(*pcustomcsview);
-    auto targetHeight = ::ChainActive().Height() + 1;
+    int targetHeight = mnview.GetLastHeight() + 1;
 
     CalcMissingRewardTempFix(mnview, targetHeight, *pwallet);
 
@@ -291,25 +291,25 @@ static std::vector<CTxIn> GetInputs(const UniValue &inputs) {
     return vin;
 }
 
-std::optional<CScript> AmIFounder(CWallet *const pwallet) {
-    auto members = Params().GetConsensus().foundationMembers;
-    const auto attributes = pcustomcsview->GetAttributes();
-    assert(attributes);
-    if (attributes->GetValue(CDataStructureV0{AttributeTypes::Param, ParamIDs::Feature, DFIPKeys::GovFoundation},
-                             false)) {
-        if (const auto databaseMembers = attributes->GetValue(
-                CDataStructureV0{AttributeTypes::Param, ParamIDs::Foundation, DFIPKeys::Members}, std::set<CScript>{});
-            !databaseMembers.empty()) {
-            members = databaseMembers;
-        }
-    }
-
+static std::optional<CScript> AmIInner(const std::set<CScript> &members,
+                                       const CWallet *pwallet,
+                                       const CCustomCSView &mnview) {
     for (const auto &script : members) {
         if (IsMineCached(*pwallet, script) == ISMINE_SPENDABLE) {
             return {script};
         }
     }
     return {};
+}
+
+static std::optional<CScript> AmIFounder(const CWallet *pwallet, const CCustomCSView &mnview) {
+    const auto members = GetFoundationMembers(mnview);
+    return AmIInner(members, pwallet, mnview);
+}
+
+static std::optional<CScript> AmIGovernance(const CWallet *pwallet, const CCustomCSView &mnview) {
+    const auto members = GetGovernanceMembers(mnview);
+    return AmIInner(members, pwallet, mnview);
 }
 
 static std::optional<CTxIn> GetAuthInputOnly(
@@ -382,23 +382,11 @@ static CTransactionRef CreateAuthTx(CWalletCoinsUnlocker &pwallet,
     return fund(mtx, pwallet, {}, &coinControl, coinSelectOpts), sign(mtx, pwallet, {});
 }
 
-static std::optional<CTxIn> GetAnyFoundationAuthInput(CWalletCoinsUnlocker &pwallet) {
-    auto members = Params().GetConsensus().foundationMembers;
-    const auto attributes = pcustomcsview->GetAttributes();
-    assert(attributes);
-    if (attributes->GetValue(CDataStructureV0{AttributeTypes::Param, ParamIDs::Feature, DFIPKeys::GovFoundation},
-                             false)) {
-        if (const auto databaseMembers = attributes->GetValue(
-                CDataStructureV0{AttributeTypes::Param, ParamIDs::Foundation, DFIPKeys::Members}, std::set<CScript>{});
-            !databaseMembers.empty()) {
-            members = databaseMembers;
-        }
-    }
-
-    for (const auto &founderScript : members) {
-        if (IsMineCached(*pwallet, founderScript) == ISMINE_SPENDABLE) {
+static std::optional<CTxIn> GetAnyAuthInner(const std::set<CScript> &members, CWalletCoinsUnlocker &pwallet) {
+    for (const auto &script : members) {
+        if (IsMineCached(*pwallet, script) == ISMINE_SPENDABLE) {
             CTxDestination destination;
-            if (ExtractDestination(founderScript, destination)) {
+            if (ExtractDestination(script, destination)) {
                 if (auto auth = GetAuthInputOnly(pwallet, destination)) {
                     return auth;
                 }
@@ -408,13 +396,25 @@ static std::optional<CTxIn> GetAnyFoundationAuthInput(CWalletCoinsUnlocker &pwal
     return {};
 }
 
+static std::optional<CTxIn> GetAnyFoundationAuthInput(CWalletCoinsUnlocker &pwallet, const CCustomCSView &mnview) {
+    const auto members = GetFoundationMembers(mnview);
+    return GetAnyAuthInner(members, pwallet);
+}
+
+static std::optional<CTxIn> GetAnyGovernanceAuthInput(CWalletCoinsUnlocker &pwallet, const CCustomCSView &mnview) {
+    std::set<CScript> members = GetGovernanceMembers(mnview);
+    return GetAnyAuthInner(members, pwallet);
+}
+
 std::vector<CTxIn> GetAuthInputsSmart(CWalletCoinsUnlocker &pwallet,
                                       int32_t txVersion,
                                       std::set<CScript> &auths,
                                       bool needFounderAuth,
                                       CTransactionRef &optAuthTx,
                                       const UniValue &explicitInputs,
-                                      const CoinSelectionOptions &coinSelectOpts) {
+                                      CCustomCSView &mnview,
+                                      const CoinSelectionOptions &coinSelectOpts,
+                                      bool needGovernanceAuth) {
     if (!explicitInputs.isNull() && !explicitInputs.empty()) {
         return GetInputs(explicitInputs);
     }
@@ -438,16 +438,27 @@ std::vector<CTxIn> GetAuthInputsSmart(CWalletCoinsUnlocker &pwallet,
             notFoundYet.insert(auth);
         }
     }
+
     // Look for founder's auth. minttoken may already have an auth in result.
     if (needFounderAuth && result.empty()) {
-        auto anyFounder = AmIFounder(pwallet);
-        if (anyFounder) {
+        if (auto anyFounder = AmIFounder(pwallet, mnview)) {
             auths.insert(anyFounder.value());
-            auto authInput = GetAnyFoundationAuthInput(pwallet);
-            if (authInput) {
+            if (auto authInput = GetAnyFoundationAuthInput(pwallet, mnview)) {
                 result.push_back(authInput.value());
             } else {
                 notFoundYet.insert(anyFounder.value());
+            }
+        }
+    }
+
+    // Look for Governance auth
+    if (needGovernanceAuth && result.empty()) {
+        if (auto anyGovernance = AmIGovernance(pwallet, mnview)) {
+            auths.insert(anyGovernance.value());
+            if (auto authInput = GetAnyGovernanceAuthInput(pwallet, mnview)) {
+                result.push_back(authInput.value());
+            } else {
+                notFoundYet.insert(anyGovernance.value());
             }
         }
     }
@@ -471,7 +482,7 @@ std::vector<CTxIn> GetAuthInputsSmart(CWalletCoinsUnlocker &pwallet,
     return result;
 }
 
-void execTestTx(const CTransaction &tx, uint32_t height, CTransactionRef optAuthTx) {
+void execTestTx(const CTransaction &tx, const uint32_t height, const CTransactionRef &optAuthTx) {
     std::vector<unsigned char> metadata;
     auto txType = GuessCustomTxType(tx, metadata);
     auto txMessage = customTypeToMessage(txType);
@@ -482,21 +493,15 @@ void execTestTx(const CTransaction &tx, uint32_t height, CTransactionRef optAuth
         if (optAuthTx) {
             AddCoins(coins, *optAuthTx, height);
         }
-        CCustomCSView view(*pcustomcsview);
-        auto consensus = Params().GetConsensus();
-        const auto isEvmEnabledForBlock = IsEVMEnabled(view, consensus);
-        std::shared_ptr<CScopedTemplateID> evmTemplateId{};
-        res = CustomTxVisit(view,
-                            coins,
-                            tx,
-                            height,
-                            consensus,
-                            txMessage,
-                            ::ChainActive().Tip()->nTime,
-                            0,
-                            evmTemplateId,
-                            isEvmEnabledForBlock,
-                            true);
+        BlockContext blockCtx(height, ::ChainActive().Tip()->nTime, Params().GetConsensus());
+        blockCtx.SetEVMPreValidate(true);
+
+        const auto txCtx = TransactionContext{
+            coins,
+            tx,
+            blockCtx,
+        };
+        res = CustomTxVisit(txMessage, blockCtx, txCtx);
     }
     if (!res) {
         if (res.code == CustomTxErrCodes::NotEnoughBalance) {
@@ -518,13 +523,8 @@ CWalletCoinsUnlocker GetWallet(const JSONRPCRequest &request) {
     return CWalletCoinsUnlocker{std::move(wallet)};
 }
 
-std::optional<FutureSwapHeightInfo> GetFuturesBlock(const uint32_t typeId) {
-    LOCK(cs_main);
-
-    const auto attributes = pcustomcsview->GetAttributes();
-    if (!attributes) {
-        return {};
-    }
+std::optional<FutureSwapHeightInfo> GetFuturesBlock(const uint32_t typeId, CCustomCSView &mnview) {
+    const auto attributes = mnview.GetAttributes();
 
     CDataStructureV0 activeKey{AttributeTypes::Param, typeId, DFIPKeys::Active};
     const auto active = attributes->GetValue(activeKey, false);
@@ -608,6 +608,8 @@ UniValue setgov(const JSONRPCRequest &request) {
 
     RPCTypeCheck(request.params, {UniValue::VOBJ, UniValue::VARR}, true);
 
+    auto [view, accountView, vaultView] = GetSnapshots();
+
     CDataStream varStream(SER_NETWORK, PROTOCOL_VERSION);
     if (request.params.size() > 0 && request.params[0].isObject()) {
         for (const std::string &name : request.params[0].getKeys()) {
@@ -619,33 +621,6 @@ UniValue setgov(const JSONRPCRequest &request) {
             if (!res) {
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, res.msg);
             }
-
-            if (name == "ATTRIBUTES") {
-                const auto attributes = std::dynamic_pointer_cast<ATTRIBUTES>(gv);
-                if (!attributes) {
-                    throw JSONRPCError(RPC_INVALID_REQUEST, "Failed to convert Gov var to attributes");
-                }
-
-                LOCK(cs_main);
-                const auto attrMap = attributes->GetAttributesMap();
-                for (const auto &[key, value] : attrMap) {
-                    if (const auto attrV0 = std::get_if<CDataStructureV0>(&key)) {
-                        DCT_ID tokenID{attrV0->typeId};
-                        if (attrV0->type == AttributeTypes::Consortium) {
-                            bool isDAT{};
-                            if (auto token = pcustomcsview->GetToken(tokenID)) {
-                                isDAT = token->IsDAT();
-                            }
-
-                            if (attrV0->typeId == 0 || !isDAT || pcustomcsview->GetLoanTokenByID({attrV0->typeId})) {
-                                throw JSONRPCError(RPC_INVALID_REQUEST,
-                                                   "Cannot set consortium on DFI, loan tokens and non-DAT tokens");
-                            }
-                        }
-                    }
-                }
-            }
-
             varStream << name << *gv;
         }
     }
@@ -665,8 +640,8 @@ UniValue setgov(const JSONRPCRequest &request) {
     const UniValue &txInputs = request.params[1];
     CTransactionRef optAuthTx;
     std::set<CScript> auths;
-    rawTx.vin =
-        GetAuthInputsSmart(pwallet, rawTx.nVersion, auths, true, optAuthTx, txInputs, request.metadata.coinSelectOpts);
+    rawTx.vin = GetAuthInputsSmart(
+        pwallet, rawTx.nVersion, auths, true, optAuthTx, txInputs, *view, request.metadata.coinSelectOpts, true);
 
     CCoinControl coinControl;
 
@@ -735,19 +710,16 @@ UniValue unsetgov(const JSONRPCRequest &request) {
 
     RPCTypeCheck(request.params, {UniValue::VOBJ, UniValue::VARR}, true);
 
-    std::map<std::string, std::vector<std::string>> govs;
-    if (request.params.size() > 0 && request.params[0].isObject()) {
-        for (const std::string &name : request.params[0].getKeys()) {
-            auto gv = GovVariable::Create(name);
-            if (!gv) {
-                throw JSONRPCError(RPC_INVALID_REQUEST, "Variable " + name + " not registered");
-            }
-            auto &keys = govs[name];
-            const auto &value = request.params[0][name];
-            if (value.isArray()) {
-                for (const auto &key : value.getValues()) {
-                    keys.push_back(key.get_str());
-                }
+    CGovView::UnsetGovVars govs;
+    for (const std::string &name : request.params[0].getKeys()) {
+        if (auto gv = GovVariable::Create(name); !gv) {
+            throw JSONRPCError(RPC_INVALID_REQUEST, "Variable " + name + " not registered");
+        }
+        auto &keys = govs[name];
+        const auto &value = request.params[0][name];
+        if (value.isArray()) {
+            for (const auto &key : value.getValues()) {
+                keys.push_back(key.get_str());
             }
         }
     }
@@ -758,7 +730,8 @@ UniValue unsetgov(const JSONRPCRequest &request) {
     CScript scriptMeta;
     scriptMeta << OP_RETURN << ToByteVector(metadata);
 
-    int targetHeight = pcustomcsview->GetLastHeight() + 1;
+    auto [view, accountView, vaultView] = GetSnapshots();
+    auto targetHeight = view->GetLastHeight() + 1;
 
     const auto txVersion = GetTransactionVersion(targetHeight);
     CMutableTransaction rawTx(txVersion);
@@ -767,8 +740,8 @@ UniValue unsetgov(const JSONRPCRequest &request) {
     const UniValue &txInputs = request.params[1];
     CTransactionRef optAuthTx;
     std::set<CScript> auths;
-    rawTx.vin =
-        GetAuthInputsSmart(pwallet, rawTx.nVersion, auths, true, optAuthTx, txInputs, request.metadata.coinSelectOpts);
+    rawTx.vin = GetAuthInputsSmart(
+        pwallet, rawTx.nVersion, auths, true, optAuthTx, txInputs, *view, request.metadata.coinSelectOpts, true);
 
     CCoinControl coinControl;
 
@@ -841,48 +814,24 @@ UniValue setgovheight(const JSONRPCRequest &request) {
 
     RPCTypeCheck(request.params, {UniValue::VOBJ, UniValue::VNUM, UniValue::VARR}, true);
 
+    auto [view, accountView, vaultView] = GetSnapshots();
+
     CDataStream varStream(SER_NETWORK, PROTOCOL_VERSION);
     const auto keys = request.params[0].getKeys();
-    if (!keys.empty()) {
-        const std::string &name = request.params[0].getKeys()[0];
-        auto gv = GovVariable::Create(name);
-        if (!gv) {
-            throw JSONRPCError(RPC_INVALID_REQUEST, "Variable " + name + " not registered");
-        }
-        const auto res = gv->Import(request.params[0][name]);
-        if (!res) {
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, res.msg);
-        }
-        varStream << name << *gv;
-
-        if (name == "ATTRIBUTES") {
-            const auto attributes = std::dynamic_pointer_cast<ATTRIBUTES>(gv);
-            if (!attributes) {
-                throw JSONRPCError(RPC_INVALID_REQUEST, "Failed to convert Gov var to attributes");
-            }
-
-            LOCK(cs_main);
-            const auto attrMap = attributes->GetAttributesMap();
-            for (const auto &[key, value] : attrMap) {
-                if (const auto attrV0 = std::get_if<CDataStructureV0>(&key)) {
-                    DCT_ID tokenID{attrV0->typeId};
-                    if (attrV0->type == AttributeTypes::Consortium) {
-                        bool isDAT{};
-                        if (auto token = pcustomcsview->GetToken(tokenID)) {
-                            isDAT = token->IsDAT();
-                        }
-
-                        if (attrV0->typeId == 0 || !isDAT || pcustomcsview->GetLoanTokenByID({attrV0->typeId})) {
-                            throw JSONRPCError(RPC_INVALID_REQUEST,
-                                               "Cannot set consortium on DFI, loan tokens and non-DAT tokens");
-                        }
-                    }
-                }
-            }
-        }
-    } else {
+    if (keys.empty()) {
         throw JSONRPCError(RPC_INVALID_REQUEST, "No Governance variable provided.");
     }
+
+    const std::string &name = request.params[0].getKeys()[0];
+    auto gv = GovVariable::Create(name);
+    if (!gv) {
+        throw JSONRPCError(RPC_INVALID_REQUEST, "Variable " + name + " not registered");
+    }
+    const auto res = gv->Import(request.params[0][name]);
+    if (!res) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, res.msg);
+    }
+    varStream << name << *gv;
 
     const uint32_t startHeight = request.params[1].get_int();
 
@@ -901,12 +850,199 @@ UniValue setgovheight(const JSONRPCRequest &request) {
     const UniValue &txInputs = request.params[2];
     CTransactionRef optAuthTx;
     std::set<CScript> auths;
-    rawTx.vin =
-        GetAuthInputsSmart(pwallet, rawTx.nVersion, auths, true, optAuthTx, txInputs, request.metadata.coinSelectOpts);
+    rawTx.vin = GetAuthInputsSmart(
+        pwallet, rawTx.nVersion, auths, true, optAuthTx, txInputs, *view, request.metadata.coinSelectOpts, true);
 
     CCoinControl coinControl;
 
     // Set change to selected foundation address
+    if (!auths.empty()) {
+        CTxDestination dest;
+        ExtractDestination(*auths.cbegin(), dest);
+        if (IsValidDestination(dest)) {
+            coinControl.destChange = dest;
+        }
+    }
+
+    fund(rawTx, pwallet, optAuthTx, &coinControl, request.metadata.coinSelectOpts);
+
+    // check execution
+    execTestTx(CTransaction(rawTx), targetHeight, optAuthTx);
+
+    return signsend(rawTx, pwallet, optAuthTx)->GetHash().GetHex();
+}
+
+UniValue unsetgovheight(const JSONRPCRequest &request) {
+    auto pwallet = GetWallet(request);
+
+    RPCHelpMan{
+        "unsetgovheight",
+        "\nUnset governance variables at height: ATTRIBUTES, ICX_TAKERFEE_PER_BTC, LP_LOAN_TOKEN_SPLITS, LP_SPLITS, "
+        "ORACLE_BLOCK_INTERVAL, ORACLE_DEVIATION\n",
+        {
+          {
+                "variables",
+                RPCArg::Type::OBJ,
+                RPCArg::Optional::NO,
+                "Object with variables",
+                {
+                    {"name", RPCArg::Type::STR, RPCArg::Optional::NO, "Variable's name is the key."},
+                },
+            }, {"height", RPCArg::Type::NUM, RPCArg::Optional::NO, "Start height for the changes to take effect."},
+          {
+                "inputs",
+                RPCArg::Type::ARR,
+                RPCArg::Optional::OMITTED_NAMED_ARG,
+                "A json array of json objects",
+                {
+                    {
+                        "",
+                        RPCArg::Type::OBJ,
+                        RPCArg::Optional::OMITTED,
+                        "",
+                        {
+                            {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction id"},
+                            {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "The output number"},
+                        },
+                    },
+                },
+            }, },
+        RPCResult{"\"hash\"                  (string) The hex-encoded hash of broadcasted transaction\n"},
+        RPCExamples{HelpExampleCli("unsetgovheight", "'{\"LP_SPLITS\": [\"2\",\"3\"]}'") +
+                    HelpExampleRpc("unsetgovheight", "'{\"ATTRIBUTES\": [\"v0/params/feature/pizza-party\"]}'")},
+    }
+        .Check(request);
+
+    if (pwallet->chain().isInitialBlockDownload()) {
+        throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+                           "Cannot create transactions while still in Initial Block Download");
+    }
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    RPCTypeCheck(request.params, {UniValue::VOBJ, UniValue::VNUM, UniValue::VARR}, true);
+
+    CGovView::UnsetGovVars govs;
+    for (const std::string &name : request.params[0].getKeys()) {
+        if (auto gv = GovVariable::Create(name); !gv) {
+            throw JSONRPCError(RPC_INVALID_REQUEST, "Variable " + name + " not registered");
+        }
+        auto &unsetKeys = govs[name];
+        const auto &value = request.params[0][name];
+        if (value.isArray()) {
+            for (const auto &key : value.getValues()) {
+                unsetKeys.push_back(key.get_str());
+            }
+        }
+    }
+
+    const uint32_t unsetHeight = request.params[1].get_int();
+
+    CGovernanceUnsetHeightMessage unsetGovMsg{govs, unsetHeight};
+
+    CDataStream metadata(DfTxMarker, SER_NETWORK, PROTOCOL_VERSION);
+    metadata << static_cast<unsigned char>(CustomTxType::UnsetGovHeightVariable) << unsetGovMsg;
+
+    CScript scriptMeta;
+    scriptMeta << OP_RETURN << ToByteVector(metadata);
+
+    auto [view, accountView, vaultView] = GetSnapshots();
+    auto targetHeight = view->GetLastHeight() + 1;
+
+    const auto txVersion = GetTransactionVersion(targetHeight);
+    CMutableTransaction rawTx(txVersion);
+    rawTx.vout.push_back(CTxOut(0, scriptMeta));
+
+    const UniValue &txInputs = request.params[1];
+    CTransactionRef optAuthTx;
+    std::set<CScript> auths;
+    rawTx.vin = GetAuthInputsSmart(
+        pwallet, rawTx.nVersion, auths, true, optAuthTx, txInputs, *view, request.metadata.coinSelectOpts, true);
+
+    CCoinControl coinControl;
+
+    // Set change to selected foundation address
+    if (!auths.empty()) {
+        CTxDestination dest;
+        ExtractDestination(*auths.cbegin(), dest);
+        if (IsValidDestination(dest)) {
+            coinControl.destChange = dest;
+        }
+    }
+
+    fund(rawTx, pwallet, optAuthTx, &coinControl, request.metadata.coinSelectOpts);
+
+    // check execution
+    execTestTx(CTransaction(rawTx), targetHeight, optAuthTx);
+
+    return signsend(rawTx, pwallet, optAuthTx)->GetHash().GetHex();
+}
+
+UniValue cleargovheights(const JSONRPCRequest &request) {
+    auto pwallet = GetWallet(request);
+
+    RPCHelpMan{
+        "cleargovheights",
+        "\nClear all pending setgovheight and unsetgovheight changes\n",
+        {{
+            "inputs",
+            RPCArg::Type::ARR,
+            RPCArg::Optional::OMITTED_NAMED_ARG,
+            "A json array of json objects",
+            {
+                {
+                    "",
+                    RPCArg::Type::OBJ,
+                    RPCArg::Optional::OMITTED,
+                    "",
+                    {
+                        {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction id"},
+                        {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "The output number"},
+                    },
+                },
+            },
+        }},
+        RPCResult{"\"hash\"                  (string) The hex-encoded hash of broadcasted transaction\n"},
+        RPCExamples{HelpExampleRpc("cleargovheights", "")},
+    }
+        .Check(request);
+
+    RPCTypeCheck(request.params, {UniValue::VARR}, true);
+
+    if (pwallet->chain().isInitialBlockDownload()) {
+        throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+                           "Cannot create transactions while still in Initial Block Download");
+    }
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    auto [view, accountView, vaultView] = GetSnapshots();
+
+    CDataStream metadata(DfTxMarker, SER_NETWORK, PROTOCOL_VERSION);
+    metadata << static_cast<unsigned char>(CustomTxType::ClearGovHeights);
+
+    CScript scriptMeta;
+    scriptMeta << OP_RETURN << ToByteVector(metadata);
+
+    int targetHeight = chainHeight(*pwallet->chain().lock()) + 1;
+
+    const auto txVersion = GetTransactionVersion(targetHeight);
+    CMutableTransaction rawTx(txVersion);
+    rawTx.vout.emplace_back(0, scriptMeta);
+
+    CTransactionRef optAuthTx;
+    std::set<CScript> auths;
+    rawTx.vin = GetAuthInputsSmart(pwallet,
+                                   rawTx.nVersion,
+                                   auths,
+                                   true,
+                                   optAuthTx,
+                                   request.params[0],
+                                   *view,
+                                   request.metadata.coinSelectOpts,
+                                   true);
+
+    CCoinControl coinControl;
+
+    // Set change to selected address
     if (!auths.empty()) {
         CTxDestination dest;
         ExtractDestination(*auths.cbegin(), dest);
@@ -940,24 +1076,30 @@ UniValue getgov(const JSONRPCRequest &request) {
         return *res;
     }
 
-    LOCK(cs_main);
+    auto [view, accountView, vaultView] = GetSnapshots();
 
     const auto name = request.params[0].getValStr();
-    if (const auto var = pcustomcsview->GetVariable(name)) {
+    if (const auto var = view->GetVariable(name)) {
         UniValue ret(UniValue::VOBJ);
-        ret.pushKV(var->GetName(), var->Export());
+        if (name == "ATTRIBUTES") {
+            if (auto attributes = std::dynamic_pointer_cast<ATTRIBUTES>(var)) {
+                ret.pushKV(var->GetName(), attributes->ExportFiltered(GovVarsFilter::All, "", view.get()));
+            }
+        } else {
+            ret.pushKV(var->GetName(), var->Export());
+        }
         return GetRPCResultCache().Set(request, ret);
     }
     throw JSONRPCError(RPC_INVALID_REQUEST, "Variable '" + name + "' not registered");
 }
 
-static void AddDefaultVars(uint64_t height, CChainParams params, ATTRIBUTES &attrs) {
+static void AddDefaultVars(uint64_t height, CChainParams params, ATTRIBUTES &attrs, CCustomCSView &view) {
     // OpReturnLimits
     const auto opReturnLimits = OpReturnLimits::From(height, params.GetConsensus(), attrs);
     opReturnLimits.SetToAttributesIfNotExists(attrs);
 
     // TransferDomainConfig
-    const auto tdConfig = TransferDomainConfig::From(*pcustomcsview);
+    const auto tdConfig = TransferDomainConfig::From(view);
     tdConfig.SetToAttributesIfNotExists(attrs);
 }
 
@@ -1024,16 +1166,17 @@ UniValue listgovs(const JSONRPCRequest &request) {
                                   "ORACLE_DEVIATION",
                                   "ATTRIBUTES"};
 
-    LOCK(cs_main);
+    auto [view, accountView, vaultView] = GetSnapshots();
 
     // Get all stored Gov var changes
-    auto pending = pcustomcsview->GetAllStoredVariables();
-    const auto height = pcustomcsview->GetLastHeight();
+    auto pending = view->GetAllStoredVariables();
+    auto pendingUnset = view->GetAllUnsetStoredVariables();
+    const auto height = view->GetLastHeight();
 
     UniValue result(UniValue::VARR);
     for (const auto &name : vars) {
         UniValue innerResult(UniValue::VARR);
-        auto var = pcustomcsview->GetVariable(name);
+        auto var = view->GetVariable(name);
         if (var) {
             UniValue ret(UniValue::VOBJ);
             UniValue val;
@@ -1043,13 +1186,12 @@ UniValue listgovs(const JSONRPCRequest &request) {
                 if (mode == GovVarsFilter::NoAttributes) {
                     skip = true;
                 } else {
-                    if (height >= Params().GetConsensus().DF22MetachainHeight) {
-                        if (auto attributes = dynamic_cast<ATTRIBUTES *>(var.get()); attributes) {
-                            AddDefaultVars(height, Params(), *attributes);
+                    if (auto attributes = std::dynamic_pointer_cast<ATTRIBUTES>(var)) {
+                        if (height >= Params().GetConsensus().DF22MetachainHeight) {
+                            AddDefaultVars(height, Params(), *attributes, *view);
                         }
+                        val = attributes->ExportFiltered(mode, prefix, view.get());
                     }
-                    auto a = std::dynamic_pointer_cast<ATTRIBUTES>(var);
-                    val = a->ExportFiltered(mode, prefix);
                 }
             } else {
                 if (mode == GovVarsFilter::LiveAttributes || mode == GovVarsFilter::PrefixedAttributes ||
@@ -1065,10 +1207,22 @@ UniValue listgovs(const JSONRPCRequest &request) {
         }
 
         // Get and add any pending changes
-        for (const auto &items : pending[name]) {
+        for (const auto &[height, var] : pending[name]) {
             UniValue ret(UniValue::VOBJ);
-            ret.pushKV(std::to_string(items.first), items.second->Export());
+            ret.pushKV(std::to_string(height), var->Export());
             innerResult.push_back(ret);
+        }
+        const auto range = pendingUnset.equal_range(name);
+        for (auto it = range.first; it != range.second; ++it) {
+            for (auto &[height, keys] : it->second) {
+                UniValue retKeys(UniValue::VARR);
+                for (const auto &key : keys) {
+                    retKeys.push_back(key);
+                }
+                UniValue ret(UniValue::VOBJ);
+                ret.pushKV(std::to_string(height), retKeys);
+                innerResult.push_back(ret);
+            }
         }
         result.push_back(innerResult);
     }
@@ -1092,17 +1246,19 @@ UniValue isappliedcustomtx(const JSONRPCRequest &request) {
 
     RPCTypeCheck(request.params, {UniValue::VSTR, UniValue::VNUM}, false);
 
-    LOCK(cs_main);
-
     UniValue result(UniValue::VBOOL);
     result.setBool(false);
 
     uint256 txHash = ParseHashV(request.params[0], "txid");
     int blockHeight = request.params[1].get_int();
 
-    auto blockindex = ::ChainActive()[blockHeight];
-    if (!blockindex) {
-        return result;
+    CBlockIndex *blockindex;
+    {
+        LOCK(cs_main);
+        blockindex = ::ChainActive()[blockHeight];
+        if (!blockindex) {
+            return result;
+        }
     }
 
     uint256 hashBlock;
@@ -1121,8 +1277,8 @@ UniValue isappliedcustomtx(const JSONRPCRequest &request) {
         return result;
     }
 
-    // post Dakota it's not allowed tx to be skipped
-    // so tx that can be found in a block is applyed
+    // Post Dakota TXs are not allowed to be skipped,
+    // so TXs found in a block are applied.
     if (blockHeight >= Params().GetConsensus().DF6DakotaHeight) {
         result.setBool(true);
     } else {
@@ -1153,6 +1309,8 @@ UniValue listsmartcontracts(const JSONRPCRequest &request) {
     }
         .Check(request);
 
+    auto [view, accountView, vaultView] = GetSnapshots();
+
     UniValue arr(UniValue::VARR);
     for (const auto &item : Params().GetConsensus().smartContracts) {
         UniValue obj(UniValue::VOBJ);
@@ -1162,7 +1320,7 @@ UniValue listsmartcontracts(const JSONRPCRequest &request) {
         obj.pushKV("call", GetContractCall(item.first));
         obj.pushKV("address", EncodeDestination(dest));
 
-        pcustomcsview->ForEachBalance(
+        view->ForEachBalance(
             [&](const CScript &owner, CTokenAmount balance) {
                 if (owner != item.second) {
                     return false;
@@ -1230,11 +1388,13 @@ static const CRPCCommand commands[] = {
     {"blockchain", "setgov",             &setgov,             {"variables", "inputs"}          },
     {"blockchain", "unsetgov",           &unsetgov,           {"variables", "inputs"}          },
     {"blockchain", "setgovheight",       &setgovheight,       {"variables", "height", "inputs"}},
+    {"blockchain", "unsetgovheight",     &unsetgovheight,     {"variables", "height", "inputs"}},
     {"blockchain", "getgov",             &getgov,             {"name"}                         },
     {"blockchain", "listgovs",           &listgovs,           {"prefix"}                       },
     {"blockchain", "isappliedcustomtx",  &isappliedcustomtx,  {"txid", "blockHeight"}          },
     {"blockchain", "listsmartcontracts", &listsmartcontracts, {}                               },
     {"blockchain", "clearmempool",       &clearmempool,       {}                               },
+    {"blockchain", "cleargovheights",    &cleargovheights,    {"inputs"}                       },
 };
 
 void RegisterMNBlockchainRPCCommands(CRPCTable &tableRPC) {

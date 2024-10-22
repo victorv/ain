@@ -5,6 +5,7 @@
 # file LICENSE or http://www.opensource.org/licenses/mit-license.php.
 """Test EVM behaviour"""
 from test_framework.evm_key_pair import EvmKeyPair
+from test_framework.evm_contract import EVMContract
 from test_framework.test_framework import DefiTestFramework
 from test_framework.util import (
     assert_equal,
@@ -14,85 +15,34 @@ from test_framework.util import (
 )
 from decimal import Decimal
 import math
+from web3 import Web3
 
 
 class EVMTest(DefiTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
         self.setup_clean_chain = True
-        self.extra_args = [
-            [
-                "-txordering=2",
-                "-dummypos=0",
-                "-txnotokens=0",
-                "-amkheight=50",
-                "-bayfrontheight=51",
-                "-dakotaheight=50",
-                "-eunosheight=80",
-                "-fortcanningheight=82",
-                "-fortcanninghillheight=84",
-                "-fortcanningroadheight=86",
-                "-fortcanningcrunchheight=88",
-                "-fortcanningspringheight=90",
-                "-fortcanninggreatworldheight=94",
-                "-fortcanningepilogueheight=96",
-                "-grandcentralheight=101",
-                "-metachainheight=105",
-                "-subsidytest=1",
-                "-txindex=1",
-            ],
-            [
-                "-txordering=2",
-                "-dummypos=0",
-                "-txnotokens=0",
-                "-amkheight=50",
-                "-bayfrontheight=51",
-                "-dakotaheight=50",
-                "-eunosheight=80",
-                "-fortcanningheight=82",
-                "-fortcanninghillheight=84",
-                "-fortcanningroadheight=86",
-                "-fortcanningcrunchheight=88",
-                "-fortcanningspringheight=90",
-                "-fortcanninggreatworldheight=94",
-                "-fortcanningepilogueheight=96",
-                "-grandcentralheight=101",
-                "-metachainheight=105",
-                "-subsidytest=1",
-                "-txindex=1",
-            ],
+        args = [
+            "-txordering=2",
+            "-dummypos=0",
+            "-txnotokens=0",
+            "-amkheight=50",
+            "-bayfrontheight=51",
+            "-dakotaheight=50",
+            "-eunosheight=80",
+            "-fortcanningheight=82",
+            "-fortcanninghillheight=84",
+            "-fortcanningroadheight=86",
+            "-fortcanningcrunchheight=88",
+            "-fortcanningspringheight=90",
+            "-fortcanninggreatworldheight=94",
+            "-fortcanningepilogueheight=96",
+            "-grandcentralheight=101",
+            "-metachainheight=105",
+            "-subsidytest=1",
+            "-ethdebug=1",
         ]
-
-    def run_test(self):
-        # Check ERC55 wallet support
-        self.erc55_wallet_support()
-
-        # Test TransferDomain, OP_RETURN and EVM Gov vars
-        self.evm_gov_vars()
-
-        # Fund accounts
-        self.setup_accounts()
-
-        # Test block ordering by nonce and Eth RBF
-        self.nonce_order_and_rbf()
-
-        # Check XVM in coinbase
-        self.validate_xvm_coinbase()
-
-        # EVM rollback
-        self.evm_rollback()
-
-        # Multiple mempool fee replacement
-        self.multiple_eth_rbf()
-
-        # Test that node should not crash without chainId param
-        self.test_tx_without_chainid()
-
-        # Test evmtx auto nonce
-        self.sendtransaction_auto_nonce()
-
-        # Toggle EVM
-        self.toggle_evm_enablement()
+        self.extra_args = [args, args]
 
     def test_tx_without_chainid(self):
         node = self.nodes[0]
@@ -113,6 +63,7 @@ class EVMTest(DefiTestFramework):
                         "amount": "50@DFI",
                         "domain": 3,
                     },
+                    "singlekeycheck": False,
                 }
             ]
         )
@@ -293,6 +244,32 @@ class EVMTest(DefiTestFramework):
             {"ATTRIBUTES": {"v0/rules/tx/dvm_op_return_max_size_bytes": 4096}},
         )
 
+        # Try and set vars before height
+        assert_raises_rpc_error(
+            -32600,
+            "Cannot be set before Metachain",
+            self.nodes[0].setgov,
+            {"ATTRIBUTES": {"v0/evm/block/finality_count": "100"}},
+        )
+        assert_raises_rpc_error(
+            -32600,
+            "Cannot be set before Metachain",
+            self.nodes[0].setgov,
+            {"ATTRIBUTES": {"v0/evm/block/gas_limit": "100"}},
+        )
+        assert_raises_rpc_error(
+            -32600,
+            "Cannot be set before Metachain",
+            self.nodes[0].setgov,
+            {"ATTRIBUTES": {"v0/evm/block/gas_target_factor": "100"}},
+        )
+        assert_raises_rpc_error(
+            -32600,
+            "Cannot be set before Metachain",
+            self.nodes[0].setgov,
+            {"ATTRIBUTES": {"v0/evm/block/rbf_increment_fee_pct": "0.1"}},
+        )
+
         # Check that a transferdomain default is not present in listgovs
         assert (
             "v0/transferdomain/dvm-evm/enabled"
@@ -334,6 +311,10 @@ class EVMTest(DefiTestFramework):
         self.nodes[0].setgov(
             {
                 "ATTRIBUTES": {
+                    "v0/evm/block/finality_count": "100",
+                    "v0/evm/block/gas_limit": "30000000",
+                    "v0/evm/block/gas_target_factor": "2",
+                    "v0/evm/block/rbf_increment_fee_pct": "0.1",
                     "v0/rules/tx/core_op_return_max_size_bytes": 20000,
                     "v0/rules/tx/evm_op_return_max_size_bytes": 20000,
                     "v0/rules/tx/dvm_op_return_max_size_bytes": 20000,
@@ -344,6 +325,10 @@ class EVMTest(DefiTestFramework):
 
         # Check OP_RETURN set
         result = self.nodes[0].getgov("ATTRIBUTES")["ATTRIBUTES"]
+        assert_equal(result["v0/evm/block/finality_count"], "100")
+        assert_equal(result["v0/evm/block/gas_limit"], "30000000")
+        assert_equal(result["v0/evm/block/gas_target_factor"], "2")
+        assert_equal(result["v0/evm/block/rbf_increment_fee_pct"], "0.1")
         assert_equal(result["v0/rules/tx/core_op_return_max_size_bytes"], "20000")
         assert_equal(result["v0/rules/tx/evm_op_return_max_size_bytes"], "20000")
         assert_equal(result["v0/rules/tx/dvm_op_return_max_size_bytes"], "20000")
@@ -377,6 +362,7 @@ class EVMTest(DefiTestFramework):
                             "amount": "100@DFI",
                             "domain": 3,
                         },
+                        "singlekeycheck": False,
                     }
                 ],
             )
@@ -399,6 +385,7 @@ class EVMTest(DefiTestFramework):
                             "amount": "100@DFI",
                             "domain": 3,
                         },
+                        "singlekeycheck": False,
                     }
                 ],
             )
@@ -434,6 +421,7 @@ class EVMTest(DefiTestFramework):
                         "amount": "100@DFI",
                         "domain": 3,
                     },
+                    "singlekeycheck": False,
                 }
             ],
         )
@@ -463,6 +451,7 @@ class EVMTest(DefiTestFramework):
                         "amount": "100@DFI",
                         "domain": 3,
                     },
+                    "singlekeycheck": False,
                 }
             ],
         )
@@ -597,6 +586,7 @@ class EVMTest(DefiTestFramework):
                         "amount": "100@DFI",
                         "domain": 2,
                     },
+                    "singlekeycheck": False,
                 }
             ],
         )
@@ -626,6 +616,7 @@ class EVMTest(DefiTestFramework):
                         "domain": 3,
                     },
                     "dst": {"address": self.address, "amount": "100@DFI", "domain": 2},
+                    "singlekeycheck": False,
                 }
             ],
         )
@@ -655,6 +646,7 @@ class EVMTest(DefiTestFramework):
                         "domain": 3,
                     },
                     "dst": {"address": self.address, "amount": "100@DFI", "domain": 2},
+                    "singlekeycheck": False,
                 }
             ],
         )
@@ -738,6 +730,8 @@ class EVMTest(DefiTestFramework):
         assert_equal(attrs["v0/evm/block/finality_count"], "100")
 
     def setup_accounts(self):
+        self.evm_key_pair = EvmKeyPair.from_node(self.nodes[0])
+
         # Fund DFI address
         self.nodes[0].utxostoaccount({self.address: "300@DFI"})
         self.nodes[0].generate(1)
@@ -752,6 +746,7 @@ class EVMTest(DefiTestFramework):
                         "amount": "200@DFI",
                         "domain": 3,
                     },
+                    "singlekeycheck": False,
                 }
             ]
         )
@@ -972,7 +967,7 @@ class EVMTest(DefiTestFramework):
         # Try and send an already sent transaction
         assert_raises_rpc_error(
             -26,
-            "evm tx failed to pre-validate invalid nonce. Account nonce 6, signed_tx nonce 5",
+            "invalid nonce. Account nonce 6, signed_tx nonce 5",
             self.nodes[0].sendrawtransaction,
             raw_tx,
         )
@@ -1339,6 +1334,402 @@ class EVMTest(DefiTestFramework):
             int(evm_first_valid_block["number"], base=16),
             int(evm_enabling_block["number"], base=16) + 1,
         )
+
+    def encrypt_wallet(self):
+        # Test address
+        address = "0xa43D1AdBe968BFE45ECfbFa623a25077fd4F5db8"
+        priv_key = "1ba6d9404e882346a236a6742722fe79d822e2182d6808ab66cc30b7dd07c5b7"
+        pub_key = "0426f07fbd27600beccd6d4a1a3bbcfd2cced7212e201c2ff2970214ed19ba92f473e102d978c65626b46e61a4b4f770e51b944f10462a111e170aad5b65e638bd"
+
+        # Encrypt wallet
+        self.nodes[0].encryptwallet("test")
+        self.stop_nodes()
+        self.start_nodes()
+
+        # Unencrypt wallet
+        self.nodes[0].walletpassphrase("test", 600)
+
+        # Import address
+        self.nodes[0].importprivkey(priv_key)
+
+        # Check pubkey
+        assert_equal(pub_key, self.nodes[0].getaddressinfo(address)["pubkey"])
+
+        # Check equivalent DVM address
+        assert_equal(
+            "bcrt1qkhd438yhrvnleflep3xlxj4xvnm4q7r0wsxzya",
+            self.nodes[0].addressmap(address, 2)["format"]["bech32"],
+        )
+
+        # Fund EVM address
+        self.nodes[0].transferdomain(
+            [
+                {
+                    "src": {"address": self.address, "amount": "0.1@DFI", "domain": 2},
+                    "dst": {
+                        "address": address,
+                        "amount": "0.1@DFI",
+                        "domain": 3,
+                    },
+                    "singlekeycheck": False,
+                }
+            ]
+        )
+        self.nodes[0].generate(1)
+
+        # Transfer funds back
+        self.nodes[0].transferdomain(
+            [
+                {
+                    "src": {"address": address, "amount": "0.1@DFI", "domain": 3},
+                    "dst": {
+                        "address": self.address,
+                        "amount": "0.1@DFI",
+                        "domain": 2,
+                    },
+                    "singlekeycheck": False,
+                }
+            ]
+        )
+        self.nodes[0].generate(1)
+
+    def delete_account_from_trie(self):
+        addressA = self.nodes[0].getnewaddress("", "erc55")
+        addressB = self.nodes[0].getnewaddress("", "erc55")
+
+        # Fund EVM address
+        self.nodes[0].transferdomain(
+            [
+                {
+                    "src": {"address": self.address, "amount": "2@DFI", "domain": 2},
+                    "dst": {
+                        "address": addressA,
+                        "amount": "2@DFI",
+                        "domain": 3,
+                    },
+                    "singlekeycheck": False,
+                }
+            ]
+        )
+        self.nodes[0].generate(1)
+
+        self.nodes[0].evmtx(
+            addressA, 0, 21, 21001, addressB, 0
+        )  # Touch addressB and trigger deletion as empty account
+        self.nodes[0].generate(1)
+
+        # Deploy SelfDestruct contract to trigger deletion via SELFDESTRUCT opcode
+        self.nodes[0].transferdomain(
+            [
+                {
+                    "src": {"address": self.address, "amount": "20@DFI", "domain": 2},
+                    "dst": {
+                        "address": self.evm_key_pair.address,
+                        "amount": "20@DFI",
+                        "domain": 3,
+                    },
+                    "singlekeycheck": False,
+                }
+            ]
+        )
+        self.nodes[0].generate(1)
+
+        self.contract = EVMContract.from_file(
+            "SelfDestruct.sol", "SelfDestructContract"
+        )
+        abi, bytecode, deployedBytecode = self.contract.compile()
+        compiled = self.nodes[0].w3.eth.contract(abi=abi, bytecode=bytecode)
+
+        tx = compiled.constructor().build_transaction(
+            {
+                "chainId": self.nodes[0].w3.eth.chain_id,
+                "nonce": self.nodes[0].w3.eth.get_transaction_count(
+                    self.evm_key_pair.address
+                ),
+                "maxFeePerGas": 10_000_000_000,
+                "maxPriorityFeePerGas": 500_000,
+                "gas": 1_000_000,
+            }
+        )
+        signed = self.nodes[0].w3.eth.account.sign_transaction(
+            tx, self.evm_key_pair.privkey
+        )
+        hash = self.nodes[0].w3.eth.send_raw_transaction(signed.rawTransaction)
+
+        self.nodes[0].generate(1)
+
+        receipt = self.nodes[0].w3.eth.wait_for_transaction_receipt(hash)
+        self.contract_address = receipt["contractAddress"]
+        self.contract = self.nodes[0].w3.eth.contract(
+            address=receipt["contractAddress"], abi=abi
+        )
+
+        codeBefore = self.nodes[0].eth_getCode(self.contract_address)
+        assert_equal(
+            codeBefore[2:],
+            deployedBytecode,
+        )
+        storageBefore = self.nodes[0].eth_getStorageAt(self.contract_address, "0x0")
+        assert_equal(
+            Web3.to_checksum_address(storageBefore[26:]),
+            self.evm_key_pair.address,
+        )
+
+        tx = self.contract.functions.killContract(addressA).build_transaction(
+            {
+                "chainId": self.nodes[0].w3.eth.chain_id,
+                "nonce": self.nodes[0].w3.eth.get_transaction_count(
+                    self.evm_key_pair.address
+                ),
+                "gasPrice": 10_000_000_000,
+                "gas": 10_000_000,
+            }
+        )
+        signed = self.nodes[0].w3.eth.account.sign_transaction(
+            tx, self.evm_key_pair.privkey
+        )
+        hash = self.nodes[0].w3.eth.send_raw_transaction(signed.rawTransaction)
+        self.nodes[0].generate(1)
+
+        codeAfterSelfDestruct = self.nodes[0].eth_getCode(self.contract_address)
+        assert_equal(
+            codeAfterSelfDestruct,
+            "0x",
+        )
+        storageAfterSelfDestruct = self.nodes[0].eth_getStorageAt(
+            self.contract_address, "0x0"
+        )
+        assert_equal(
+            storageAfterSelfDestruct,
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+        )
+
+    def test_attributes_update(self):
+        # Set OP_RETURN
+        self.nodes[0].setgov(
+            {
+                "ATTRIBUTES": {
+                    "v0/evm/block/gas_limit": "60000000",
+                }
+            }
+        )
+
+        self.nodes[0].generate(1)
+        block = self.nodes[0].eth_getBlockByNumber("latest")
+        assert_equal(block["gasLimit"], hex(30000000))
+
+        self.nodes[0].generate(1)
+        block = self.nodes[0].eth_getBlockByNumber("latest")
+        assert_equal(block["gasLimit"], hex(60000000))
+
+    def test_gas_target_factor(self):
+        self.nodes[0].setgov(
+            {
+                "ATTRIBUTES": {
+                    "v0/evm/block/gas_target_factor": "2",
+                    "v0/evm/block/gas_limit": "50000",
+                }
+            }
+        )
+        self.nodes[0].generate(1)
+
+        def print_fee_info():
+            block_info = self.nodes[0].w3.eth.get_block("latest")
+            gas_limit = block_info["gasLimit"]
+            gas_used = block_info["gasUsed"]
+            base_fee_per_gas = block_info["baseFeePerGas"]
+            print("(gas - limit, used, fee): ", gas_limit, gas_used, base_fee_per_gas)
+
+        print_fee_info()
+
+        nonce = self.nodes[0].w3.eth.get_transaction_count(self.eth_address)
+
+        # Increase test
+        for _ in range(20):
+            for _ in range(3):
+                self.nodes[0].evmtx(
+                    self.eth_address, nonce, 100, 21001, self.to_address, 0.01
+                )
+                nonce += 1
+            # base fee increases one block after block with above TX
+            self.nodes[0].generate(1)
+            print_fee_info()
+
+        self.nodes[0].setgov(
+            {
+                "ATTRIBUTES": {
+                    "v0/evm/block/gas_target_factor": "1",
+                    "v0/evm/block/gas_limit": "50000",
+                }
+            }
+        )
+        self.nodes[0].generate(1)
+
+        # Increase test
+        for _ in range(30):
+            # base fee increases one block after block with above TX
+            self.nodes[0].generate(1)
+            print_fee_info()
+
+    def test_gas_limit(self):
+        self.nodes[0].setgov(
+            {
+                "ATTRIBUTES": {
+                    "v0/evm/block/gas_target_factor": "2",
+                    "v0/evm/block/gas_limit": "50000",
+                }
+            }
+        )
+        self.nodes[0].generate(1)
+
+        def print_fee_info():
+            block_info = self.nodes[0].w3.eth.get_block("latest")
+            gas_limit = block_info["gasLimit"]
+            gas_used = block_info["gasUsed"]
+            base_fee_per_gas = block_info["baseFeePerGas"]
+            print("(gas - limit, used, fee): ", gas_limit, gas_used, base_fee_per_gas)
+
+        print_fee_info()
+
+        nonce = self.nodes[0].w3.eth.get_transaction_count(self.eth_address)
+
+        print_fee_info()
+        # Note: base fee increases one block after block with above TX
+
+        # Increase test
+        for _ in range(20):
+            for _ in range(3):
+                self.nodes[0].evmtx(
+                    self.eth_address, nonce, 100, 21001, self.to_address, 0.01
+                )
+                nonce += 1
+            # base fee increases one block after block with above TX
+            self.nodes[0].generate(1)
+            print_fee_info()
+
+        # Mine any left overs
+        self.nodes[0].generate(1)
+
+        # Decrease test
+        for _ in range(20):
+            self.nodes[0].generate(1)
+            print_fee_info()
+
+    def test_min_rbf(self):
+        self.nodes[0].setgov(
+            {
+                "ATTRIBUTES": {
+                    "v0/evm/block/rbf_increment_fee_pct": "0.5",
+                }
+            }
+        )
+        self.nodes[0].generate(1)
+
+        nonce = self.nodes[0].w3.eth.get_transaction_count(self.eth_address)
+        self.nodes[0].evmtx(self.eth_address, nonce, 100, 21001, self.to_address, 1)
+
+        # Send tx with less than 50% in increase fees
+        assert_raises_rpc_error(
+            -26,
+            "evm-low-fee",
+            self.nodes[0].evmtx,
+            self.eth_address,
+            nonce,
+            140,
+            21001,
+            self.to_address,
+            1,
+        )
+
+        # Send tx with more than 50% in increase fees
+        self.nodes[0].evmtx(self.eth_address, nonce, 160, 21001, self.to_address, 1)
+
+        self.nodes[0].clearmempool()
+        self.nodes[0].setgov(
+            {
+                "ATTRIBUTES": {
+                    "v0/evm/block/rbf_increment_fee_pct": "1",
+                }
+            }
+        )
+        self.nodes[0].generate(1)
+        self.nodes[0].evmtx(self.eth_address, nonce, 100, 21001, self.to_address, 1)
+
+        # Send tx with less than 100% in increase fees
+        assert_raises_rpc_error(
+            -26,
+            "evm-low-fee",
+            self.nodes[0].evmtx,
+            self.eth_address,
+            nonce,
+            180,
+            21001,
+            self.to_address,
+            1,
+        )
+
+        # Send tx with more than 100% in increase fees
+        self.nodes[0].evmtx(self.eth_address, nonce, 220, 21001, self.to_address, 1)
+
+        self.nodes[0].clearmempool()
+        self.nodes[0].setgov(
+            {
+                "ATTRIBUTES": {
+                    "v0/evm/block/rbf_increment_fee_pct": "0",
+                }
+            }
+        )
+        self.nodes[0].generate(1)
+
+        self.nodes[0].evmtx(self.eth_address, nonce, 100, 21001, self.to_address, 1)
+        self.nodes[0].evmtx(
+            self.eth_address, nonce, 101, 21001, self.to_address, 2
+        )  # must be higher by at least one to make it to the mempool
+
+    def run_test(self):
+        # Check ERC55 wallet support
+        self.erc55_wallet_support()
+
+        # Test TransferDomain, OP_RETURN and EVM Gov vars
+        self.evm_gov_vars()
+
+        # Fund accounts
+        self.setup_accounts()
+
+        # Test block ordering by nonce and Eth RBF
+        self.nonce_order_and_rbf()
+
+        # Check XVM in coinbase
+        self.validate_xvm_coinbase()
+
+        # EVM rollback
+        self.evm_rollback()
+
+        # Multiple mempool fee replacement
+        self.multiple_eth_rbf()
+
+        # Test that node should not crash without chainId param
+        self.test_tx_without_chainid()
+
+        # Test evmtx auto nonce
+        self.sendtransaction_auto_nonce()
+
+        # Toggle EVM
+        self.toggle_evm_enablement()
+
+        # Test Eth on encrypted wallet
+        self.encrypt_wallet()
+
+        # Delete state account
+        self.delete_account_from_trie()
+
+        # Check attributes values update
+        self.test_attributes_update()
+
+        # self.test_gas_limit()
+        # self.test_gas_target_factor()
+
+        self.test_min_rbf()
 
 
 if __name__ == "__main__":

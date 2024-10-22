@@ -11,7 +11,14 @@
 extern std::string ScriptToString(const CScript &script);
 
 Res CVaultsConsensus::operator()(const CVaultMessage &obj) const {
-    auto vaultCreationFee = consensus.vaultCreationFee;
+    const auto &consensus = txCtx.GetConsensus();
+    const auto &tx = txCtx.GetTransaction();
+    auto &mnview = blockCtx.GetView();
+    auto &height = blockCtx.GetHeight();
+    auto attributes = mnview.GetAttributes();
+
+    const CDataStructureV0 creationFeeKey{AttributeTypes::Vaults, VaultIDs::Parameters, VaultKeys::CreationFee};
+    const auto vaultCreationFee = attributes->GetValue(creationFeeKey, consensus.vaultCreationFee);
     if (tx.vout[0].nValue != vaultCreationFee || tx.vout[0].nTokenId != DCT_ID{0}) {
         return Res::Err("Malformed tx vouts, creation vault fee is %s DFI", GetDecimalString(vaultCreationFee));
     }
@@ -34,12 +41,18 @@ Res CVaultsConsensus::operator()(const CVaultMessage &obj) const {
     }
 
     // check loan scheme is not to be destroyed
-    auto height = mnview.GetDestroyLoanScheme(obj.schemeId);
-    if (height) {
-        return Res::Err("Cannot set %s as loan scheme, set to be destroyed on block %d", obj.schemeId, *height);
+    if (auto schemeHeight = mnview.GetDestroyLoanScheme(obj.schemeId); schemeHeight) {
+        return Res::Err("Cannot set %s as loan scheme, set to be destroyed on block %d", obj.schemeId, *schemeHeight);
     }
 
     auto vaultId = tx.GetHash();
+
+    if (height >= consensus.DF23Height) {
+        if (!mnview.SetVaultCreationFee(vaultId, vaultCreationFee)) {
+            return Res::Err("Failed to set vault height and fee");
+        }
+    }
+
     return mnview.StoreVault(vaultId, vault);
 }
 
@@ -47,6 +60,10 @@ Res CVaultsConsensus::operator()(const CCloseVaultMessage &obj) const {
     if (auto res = CheckCustomTx(); !res) {
         return res;
     }
+
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    auto &mnview = blockCtx.GetView();
 
     // vault exists
     auto vault = mnview.GetVault(obj.vaultId);
@@ -104,10 +121,16 @@ Res CVaultsConsensus::operator()(const CCloseVaultMessage &obj) const {
     }
 
     // return half fee, the rest is burned at creation
-    auto feeBack = consensus.vaultCreationFee / 2;
+    const auto vaultCreationFee = mnview.GetVaultCreationFee(obj.vaultId);
+    auto feeBack = vaultCreationFee ? *vaultCreationFee / 2 : consensus.vaultCreationFee / 2;
     if (auto res = mnview.AddBalance(obj.to, {DCT_ID{0}, feeBack}); !res) {
         return res;
     }
+
+    if (vaultCreationFee && !mnview.EraseVaultCreationFee(obj.vaultId)) {
+        return Res::Err("Failed to erase vault height and fee");
+    }
+
     return mnview.EraseVault(obj.vaultId);
 }
 
@@ -115,6 +138,10 @@ Res CVaultsConsensus::operator()(const CUpdateVaultMessage &obj) const {
     if (auto res = CheckCustomTx(); !res) {
         return res;
     }
+
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    auto &mnview = blockCtx.GetView();
 
     // vault exists
     auto vault = mnview.GetVault(obj.vaultId);
@@ -190,6 +217,10 @@ Res CVaultsConsensus::operator()(const CDepositToVaultMessage &obj) const {
         return Res::Err("tx must have at least one input from token owner");
     }
 
+    const auto height = txCtx.GetHeight();
+    const auto time = txCtx.GetTime();
+    auto &mnview = blockCtx.GetView();
+
     // vault exists
     auto vault = mnview.GetVault(obj.vaultId);
     if (!vault) {
@@ -204,10 +235,9 @@ Res CVaultsConsensus::operator()(const CDepositToVaultMessage &obj) const {
     // If collateral token exist make sure it is enabled.
     if (mnview.GetCollateralTokenFromAttributes(obj.amount.nTokenId)) {
         CDataStructureV0 collateralKey{AttributeTypes::Token, obj.amount.nTokenId.v, TokenKeys::LoanCollateralEnabled};
-        if (const auto attributes = mnview.GetAttributes()) {
-            if (!attributes->GetValue(collateralKey, false)) {
-                return Res::Err("Collateral token (%d) is disabled", obj.amount.nTokenId.v);
-            }
+        const auto attributes = mnview.GetAttributes();
+        if (!attributes->GetValue(collateralKey, false)) {
+            return Res::Err("Collateral token (%d) is disabled", obj.amount.nTokenId.v);
         }
     }
 
@@ -238,6 +268,11 @@ Res CVaultsConsensus::operator()(const CWithdrawFromVaultMessage &obj) const {
         return res;
     }
 
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    const auto time = txCtx.GetTime();
+    auto &mnview = blockCtx.GetView();
+
     // vault exists
     auto vault = mnview.GetVault(obj.vaultId);
     if (!vault) {
@@ -264,7 +299,7 @@ Res CVaultsConsensus::operator()(const CWithdrawFromVaultMessage &obj) const {
 
     auto hasDUSDLoans = false;
 
-    std::optional<std::pair<DCT_ID, std::optional<CTokensView::CTokenImpl> > > tokenDUSD;
+    std::optional<CTokensView::TokenIDPair> tokenDUSD;
     if (static_cast<int>(height) >= consensus.DF15FortCanningRoadHeight) {
         tokenDUSD = mnview.GetToken("DUSD");
     }
@@ -345,6 +380,10 @@ Res CVaultsConsensus::operator()(const CAuctionBidMessage &obj) const {
     if (!HasAuth(obj.from)) {
         return Res::Err("tx must have at least one input from token owner");
     }
+
+    const auto &consensus = txCtx.GetConsensus();
+    const auto height = txCtx.GetHeight();
+    auto &mnview = blockCtx.GetView();
 
     // vault exists
     auto vault = mnview.GetVault(obj.vaultId);

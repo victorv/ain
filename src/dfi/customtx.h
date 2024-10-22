@@ -50,6 +50,9 @@ enum class CustomTxType : uint8_t {
     // set governance variable
     SetGovVariable = 'G',
     SetGovVariableHeight = 'j',
+    UnsetGovVariable = 'Z',
+    UnsetGovHeightVariable = '-',
+    ClearGovHeights = '+',
     // Auto auth TX
     AutoAuthPrep = 'A',
     // oracles
@@ -86,12 +89,13 @@ enum class CustomTxType : uint8_t {
     FutureSwapExecution = 'q',
     FutureSwapRefund = 'w',
     TokenSplit = 'P',
+    TokenLock = '?',
+    TokenLockRelease = '!',
     // On-Chain-Gov
     CreateCfp = 'z',
     Vote = 'O',       // NOTE: Check whether this overlapping with CreateOrder above is fine
     CreateVoc = 'E',  // NOTE: Check whether this overlapping with DestroyOrder above is fine
     ProposalFeeRedistribution = 'Y',
-    UnsetGovVariable = 'Z',
     // EVM
     TransferDomain = '8',
     EvmTx = '9',
@@ -102,7 +106,7 @@ CustomTxType GuessCustomTxType(const CTransaction &tx,
                                bool metadataValidation = false);
 TAmounts GetNonMintedValuesOut(const CTransaction &tx);
 CAmount GetNonMintedValueOut(const CTransaction &tx, DCT_ID tokenID);
-bool IsBelowDakotaMintTokenOrAccountToUtxos(CustomTxType txType, int height);
+bool IsBelowDF6MintTokenOrAccountToUtxos(CustomTxType txType, int height);
 CustomTxType CustomTxCodeToType(uint8_t ch);
 std::string ToString(CustomTxType type);
 CustomTxType FromString(const std::string &str);

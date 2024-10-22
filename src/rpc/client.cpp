@@ -320,6 +320,10 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "listburnhistory", 0, "options" },
     { "accounthistorycount", 1, "options" },
 
+    { "releaselockedtokens", 0, "releasePart" },
+
+    { "logdvmstate", 0, "size" },
+
     { "setgov", 0, "variables" },
     { "setgov", 1, "inputs" },
 
@@ -329,6 +333,12 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "setgovheight", 0, "variables" },
     { "setgovheight", 1, "height" },
     { "setgovheight", 2, "inputs" },
+
+    { "unsetgovheight", 0, "variables" },
+    { "unsetgovheight", 1, "height" },
+    { "unsetgovheight", 2, "inputs" },
+
+    { "cleargovheights", 0, "inputs" },
 
     { "isappliedcustomtx", 1, "blockHeight" },
     { "sendtokenstoaddress", 0, "from" },
@@ -370,6 +380,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "listgovproposalvotes", 3, "pagination" },
     { "listgovproposals", 2, "cycle" },
     { "listgovproposals", 3, "pagination" },
+    { "dumpevmdb", 0, "options" },
     { "evmtx", 1, "nonce" },
     { "evmtx", 2, "gasPrice" },
     { "evmtx", 3, "gasLimit" },
@@ -390,6 +401,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "eth_estimateGas", 1, "tag"},
     { "eth_createAccessList", 0, "tx"},
     { "eth_createAccessList", 1, "tag"},
+    { "eth_feeHistory", 1, "tag"},
+    { "eth_feeHistory", 2, "rewardPercentile"},
 
     { "eth_newFilter", 0, "filter"},
     { "eth_uninstallFilter", 0, "filterId"},
@@ -410,11 +423,14 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "eth_getTransactionByBlockHashAndIndex", 1, "txIndex"},
     { "eth_getTransactionByBlockNumberAndIndex", 0, "tag"},
     { "eth_getTransactionByBlockNumberAndIndex", 1, "txIndex"},
+    { "debug_feeEstimate", 0, "tx"},
+
+    { "setinterruptblock", 0, "height" },
 };
 
 /**
  * Specify a (method, idx, string param) here if the argument can alternatively be passed as a
- * string RPC argument alternative instead of the value specified in in vRPCConvertParams.
+ * string RPC argument alternative instead of the value specified in vRPCConvertParams.
  *
  * @note Parameter indexes start from 0.
  */
@@ -427,6 +443,7 @@ static const CRPCAlternateStringValParam vRPCAlternateStringValParams[] =
     { "eth_call", 1, {"earliest", "latest", "pending"}},
     { "eth_estimateGas", 1, {"earliest", "latest", "pending"}},
     { "eth_createAccessList", 1, {"earliest", "latest", "pending"}},
+    { "eth_feeHistory", 1, {"earliest", "latest", "pending"}},
 
     { "eth_getBalance", 1, {"earliest", "latest", "pending"}},
     { "eth_getStorageAt", 2, {"earliest", "latest", "pending"}},

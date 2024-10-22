@@ -64,8 +64,6 @@ public:
 
     static Res ICXSubmitEXTInvalid() { return Res::Err("Invalid refundPubkey is not a valid pubkey!"); }
 
-    static Res MNInvalidAttribute() { return Res::Err("Attributes unavailable"); }
-
     static Res TokenInvalidForName(const std::string &tokenName) { return Res::Err("Cannot find token %s", tokenName); }
 
     static Res LoanPaybackWithCollateralDisable() {
@@ -158,11 +156,15 @@ public:
 
     static Res GovVarVerifyPositiveNumber() { return Res::Err("Value must be a positive integer"); }
 
+    static Res GovVarVerifyMoreThanZero() { return Res::Err("Value must be more than zero"); }
+
     static Res GovVarInvalidNumber() { return Res::Err("Amount must be a valid number"); }
 
     static Res GovVarVerifySplitValues() { return Res::Err("Two int values expected for split in id/mutliplier"); }
 
     static Res GovVarVerifyMultiplier() { return Res::Err("Mutliplier cannot be zero"); }
+
+    static Res GovVarVerifyFactor() { return Res::Err("Factor cannot be zero"); }
 
     static Res GovVarVerifyPair() { return Res::Err("Exactly two entires expected for currency pair"); }
 
@@ -192,6 +194,14 @@ public:
         std::string error{"Unrecognised " + key + " argument provided, valid " + key + "s are:"};
         for (const auto &pair : keys) {
             error += ' ' + pair.second + ',';
+        }
+        return Res::Err(error);
+    }
+
+    static Res GovVarOracleInvalidKey(const std::map<std::string, uint8_t> &keys) {
+        std::string error{"Unrecognised key, valid keys are either block height or:"};
+        for (const auto &pair : keys) {
+            error += ' ' + pair.first + ',';
         }
         return Res::Err(error);
     }
@@ -252,6 +262,10 @@ public:
 
     static Res GovVarValidateFortCanningSpring() { return Res::Err("Cannot be set before FortCanningSpringHeight"); }
 
+    static Res GovVarValidateDF23Height() { return Res::Err("Cannot be set before DF23Height"); }
+
+    static Res GovVarValidateDF24Height() { return Res::Err("Cannot be set before DF24Height"); }
+
     static Res GovVarValidateToken(const uint32_t token) { return Res::Err("No such token (%d)", token); }
 
     static Res GovVarValidateTokenExist(const uint32_t token) { return Res::Err("Token (%d) does not exist", token); }
@@ -260,7 +274,13 @@ public:
 
     static Res GovVarValidateLoanTokenID(const uint32_t token) { return Res::Err("No loan token with id (%d)", token); }
 
+    static Res GovVarVerifySplitFractional() { return Res::Err("Fractional split not currently supported"); }
+
+    static Res GovVarVerifySplitFractionalTooSmall() { return Res::Err("Fractional split cannot be less than 1"); }
+
     static Res GovVarValidateExcessAmount() { return Res::Err("Percentage exceeds 100%%"); }
+
+    static Res GovVarTokenAsString() { return Res::Err("Token should be defined as numeric ID"); }
 
     static Res GovVarValidateNegativeAmount() { return Res::Err("Amount must be a positive value"); }
 
@@ -271,6 +291,14 @@ public:
     }
 
     static Res GovVarUnsupportedValue() { return Res::Err("Unsupported value"); }
+
+    static Res GovVarValidateBlockPeriod() { return Res::Err("Block period must be more than sampling period"); }
+
+    static Res GovVarValidateBlockHeight() { return Res::Err("Block height must be more than current height"); }
+
+    static Res GovVarValidateRestartExecuted() {
+        return Res::Err("dToken restart has already been executed and cannot be set again");
+    }
 
     static Res GovVarValidateUnsupportedKey() { return Res::Err("Unsupported key"); }
 
@@ -312,6 +340,10 @@ public:
     static Res AccountsFuturesStore() { return Res::Err("Failed to store futures"); }
 
     static Res AccountsFuturesErase() { return Res::Err("Failed to erase futures"); }
+
+    static Res AccountsTokenLockStore() { return Res::Err("Failed to store futures"); }
+
+    static Res AccountsTokenLockErase() { return Res::Err("Failed to erase futures"); }
 
     static Res TransferDomainNotEnoughBalance(const std::string address) {
         return Res::Err("Not enough balance in %s to cover \"EVM\" domain transfer", address);
@@ -420,6 +452,8 @@ public:
     static Res InvalidBlockNumberString(const std::string &number) {
         return Res::Err("Invalid block number: %s", number);
     }
+
+    static Res InvalidBlockHashString(const std::string &hash) { return Res::Err("Invalid block hash: %s", hash); }
 };
 
 #endif  // DEFI_DFI_ERRORS_H

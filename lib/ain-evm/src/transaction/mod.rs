@@ -1,6 +1,6 @@
+pub mod cache;
 pub mod system;
 
-use crate::EVMError;
 use anyhow::format_err;
 use ethereum::{
     AccessList, EnvelopedDecoderError, EnvelopedEncodable, LegacyTransaction, TransactionAction,
@@ -10,7 +10,10 @@ use ethereum_types::{H160, H256, U256};
 use rlp::RlpStream;
 use sha3::Digest;
 
-use crate::ecrecover::{public_key_to_address, recover_public_key};
+use crate::{
+    ecrecover::{public_key_to_address, recover_public_key},
+    EVMError,
+};
 
 // Lowest acceptable value for r and s in sig.
 pub const LOWER_H256: H256 = H256([
@@ -267,6 +270,19 @@ impl SignedTx {
                     .checked_add(base_fee)
                     .ok_or_else(|| format_err!("effective_gas_price overflow"))?,
             )),
+        }
+    }
+
+    pub fn effective_priority_fee_per_gas(&self, base_fee: U256) -> Result<U256, EVMError> {
+        match &self.transaction {
+            TransactionV2::Legacy(tx) => Ok(tx.gas_price.checked_sub(base_fee).unwrap_or_default()),
+            TransactionV2::EIP2930(tx) => {
+                Ok(tx.gas_price.checked_sub(base_fee).unwrap_or_default())
+            }
+            TransactionV2::EIP1559(tx) => {
+                let max_priority_fee = tx.max_fee_per_gas.checked_sub(base_fee).unwrap_or_default();
+                Ok(min(tx.max_priority_fee_per_gas, max_priority_fee))
+            }
         }
     }
 

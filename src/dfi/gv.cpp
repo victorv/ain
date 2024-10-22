@@ -27,9 +27,6 @@ Res CGovView::SetVariable(const GovVariable &var) {
         return WriteOrEraseVar(var);
     }
     auto attributes = GetAttributes();
-    if (!attributes) {
-        return WriteOrEraseVar(var);
-    }
     auto &current = dynamic_cast<const ATTRIBUTES &>(var);
     if (current.changed.empty()) {
         return Res::Ok();
@@ -119,9 +116,52 @@ void CGovView::EraseStoredVariables(const uint32_t height) {
     }
 }
 
-std::shared_ptr<ATTRIBUTES> CGovView::GetAttributes() const {
-    if (const auto var = GetVariable("ATTRIBUTES")) {
-        return std::dynamic_pointer_cast<ATTRIBUTES>(var);
+Res CGovView::SetUnsetStoredVariables(const UnsetGovVars &govVars, const uint32_t height) {
+    for (auto &[name, keys] : govVars) {
+        if (auto res = WriteBy<ByUnsetHeightVars>(GovVarKey{height, name}, keys); !res) {
+            return DeFiErrors::GovVarFailedWrite();
+        }
     }
-    return {};
+
+    return Res::Ok();
+}
+
+CGovView::UnsetGovVars CGovView::GetUnsetStoredVariables(const uint32_t height) {
+    UnsetGovVars govVars;
+    auto it = LowerBound<ByUnsetHeightVars>(GovVarKey{height, {}});
+    for (; it.Valid() && it.Key().height == height; it.Next()) {
+        govVars.emplace(it.Key().name, it.Value());
+    }
+    return govVars;
+}
+
+std::multimap<std::string, std::map<uint64_t, std::vector<std::string>>> CGovView::GetAllUnsetStoredVariables() {
+    std::multimap<std::string, std::map<uint64_t, std::vector<std::string>>> govVars;
+    auto it = LowerBound<ByUnsetHeightVars>(GovVarKey{std::numeric_limits<uint32_t>::min(), {}});
+    for (; it.Valid(); it.Next()) {
+        std::map<uint64_t, std::vector<std::string>> entry{
+            {it.Key().height, it.Value()}
+        };
+        govVars.emplace(it.Key().name, entry);
+    }
+
+    return govVars;
+}
+
+void CGovView::EraseUnsetStoredVariables(const uint32_t height) {
+    // Retrieve map of vars at specified height
+    const auto vars = GetUnsetStoredVariables(height);
+
+    // Iterate over names at this height and erase
+    for (const auto &[name, _] : vars) {
+        EraseBy<ByUnsetHeightVars>(GovVarKey{height, name});
+    }
+}
+
+std::shared_ptr<ATTRIBUTES> CGovView::GetAttributes() const {
+    const auto var = GetVariable("ATTRIBUTES");
+    assert(var);
+    auto attributes = std::dynamic_pointer_cast<ATTRIBUTES>(var);
+    assert(attributes);
+    return attributes;
 }

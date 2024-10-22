@@ -7,37 +7,34 @@ use evm::{
     executor::stack::{MemoryStackState, StackExecutor, StackSubstateMetadata},
     Config, CreateScheme, ExitReason,
 };
-use log::{debug, trace};
+
+use log::trace;
 
 use crate::{
     backend::EVMBackend,
     blocktemplate::ReceiptAndOptionalContractAddress,
     bytes::Bytes,
     contract::{
-        bridge_dfi, bridge_dst20_in, bridge_dst20_out, dst20_allowance, dst20_deploy_contract_tx,
-        dst20_deploy_info, DST20BridgeInfo, DeployContractInfo,
+        bridge_dfi,
+        dst20::{
+            bridge_dst20_in, bridge_dst20_out, dst20_allowance, dst20_deploy_contract_tx,
+            dst20_deploy_info, dst20_name_info, DST20BridgeInfo,
+        },
+        rename_contract_tx, DeployContractInfo,
     },
     core::EVMCoreService,
+    evm::BlockContext,
     fee::{calculate_current_prepay_gas_fee, calculate_gas_fee},
     precompiles::MetachainPrecompiles,
     transaction::{
-        system::{DST20Data, DeployContractData, SystemTx, TransferDirection, TransferDomainData},
+        system::{
+            DST20Data, DeployContractData, ExecuteTx, SystemTx, TransferDirection,
+            TransferDomainData, UpdateContractNameData,
+        },
         SignedTx,
     },
     Result,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExecuteTx {
-    SignedTx(Box<SignedTx>),
-    SystemTx(SystemTx),
-}
-
-impl From<SignedTx> for ExecuteTx {
-    fn from(tx: SignedTx) -> Self {
-        Self::SignedTx(Box::new(tx))
-    }
-}
 
 #[derive(Debug)]
 pub struct ExecutorContext<'a> {
@@ -53,6 +50,7 @@ pub struct AinExecutor<'backend> {
     pub backend: &'backend mut EVMBackend,
 }
 
+// State update methods
 impl<'backend> AinExecutor<'backend> {
     pub fn new(backend: &'backend mut EVMBackend) -> Self {
         Self { backend }
@@ -83,8 +81,8 @@ impl<'backend> AinExecutor<'backend> {
         self.backend.update_vicinity_with_gas_used(gas_used)
     }
 
-    pub fn commit(&mut self) -> H256 {
-        self.backend.commit()
+    pub fn commit(&mut self, is_miner: bool) -> Result<H256> {
+        self.backend.commit(is_miner)
     }
 
     pub fn get_nonce(&self, address: &H160) -> U256 {
@@ -92,6 +90,7 @@ impl<'backend> AinExecutor<'backend> {
     }
 }
 
+// EVM executor methods
 impl<'backend> AinExecutor<'backend> {
     const CONFIG: Config = Config::shanghai();
 
@@ -99,7 +98,7 @@ impl<'backend> AinExecutor<'backend> {
     pub fn call(&mut self, ctx: ExecutorContext) -> TxResponse {
         let metadata = StackSubstateMetadata::new(ctx.gas_limit, &Self::CONFIG);
         let state = MemoryStackState::new(metadata, self.backend);
-        let precompiles = MetachainPrecompiles;
+        let precompiles = MetachainPrecompiles::default();
         let mut executor = StackExecutor::new_with_precompiles(state, &Self::CONFIG, &precompiles);
         let access_list = ctx
             .access_list
@@ -146,8 +145,9 @@ impl<'backend> AinExecutor<'backend> {
         gas_limit: U256,
         base_fee: U256,
         system_tx: bool,
+        block_ctx: Option<&BlockContext>,
     ) -> Result<(TxResponse, ReceiptV3)> {
-        self.backend.update_vicinity_from_tx(signed_tx);
+        self.backend.update_vicinity_from_tx(signed_tx)?;
         trace!(
             "[Executor] Executing EVM TX with vicinity : {:?}",
             self.backend.vicinity
@@ -166,6 +166,7 @@ impl<'backend> AinExecutor<'backend> {
         } else {
             calculate_current_prepay_gas_fee(signed_tx, base_fee)?
         };
+
         if !system_tx {
             self.backend
                 .deduct_prepay_gas_fee(signed_tx.sender, prepay_fee)?;
@@ -173,7 +174,11 @@ impl<'backend> AinExecutor<'backend> {
 
         let metadata = StackSubstateMetadata::new(ctx.gas_limit, &Self::CONFIG);
         let state = MemoryStackState::new(metadata, self.backend);
-        let precompiles = MetachainPrecompiles;
+        let precompiles = if let Some(block_ctx) = block_ctx {
+            MetachainPrecompiles::new(block_ctx.mnview_ptr)
+        } else {
+            MetachainPrecompiles::default()
+        };
         let mut executor = StackExecutor::new_with_precompiles(state, &Self::CONFIG, &precompiles);
         let access_list = ctx
             .access_list
@@ -217,7 +222,6 @@ impl<'backend> AinExecutor<'backend> {
         let logs = logs.into_iter().collect::<Vec<_>>();
 
         ApplyBackend::apply(self.backend, values, logs.clone(), true);
-        self.backend.commit();
 
         if !system_tx {
             self.backend
@@ -245,8 +249,16 @@ impl<'backend> AinExecutor<'backend> {
             receipt,
         ))
     }
+}
 
-    pub fn execute_tx(&mut self, tx: ExecuteTx, base_fee: U256) -> Result<ApplyTxResult> {
+impl<'backend> AinExecutor<'backend> {
+    /// System tx execution
+    pub fn execute_tx(
+        &mut self,
+        tx: ExecuteTx,
+        base_fee: U256,
+        ctx: Option<&BlockContext>,
+    ) -> Result<ApplyTxResult> {
         match tx {
             ExecuteTx::SignedTx(signed_tx) => {
                 // Validate nonce
@@ -261,9 +273,9 @@ impl<'backend> AinExecutor<'backend> {
                 }
 
                 let (tx_response, receipt) =
-                    self.exec(&signed_tx, signed_tx.gas_limit(), base_fee, false)?;
+                    self.exec(&signed_tx, signed_tx.gas_limit(), base_fee, false, ctx)?;
 
-                debug!(
+                trace!(
                     "[execute_tx] receipt : {:?}, exit_reason {:#?} for signed_tx : {:#x}",
                     receipt,
                     tx_response.exit_reason,
@@ -275,6 +287,7 @@ impl<'backend> AinExecutor<'backend> {
 
                 Ok(ApplyTxResult {
                     tx: signed_tx,
+                    exec_flag: tx_response.exit_reason.is_succeed(),
                     used_gas: U256::from(tx_response.used_gas),
                     logs: tx_response.logs,
                     gas_fee,
@@ -300,7 +313,7 @@ impl<'backend> AinExecutor<'backend> {
                 let input = signed_tx.data();
                 let amount = U256::from_big_endian(&input[68..100]);
 
-                debug!(
+                trace!(
                     "[execute_tx] Transfer domain: {} from address {:x?}, nonce {:x?}, to address {:x?}, amount: {}",
                     direction, signed_tx.sender, signed_tx.nonce(), to, amount,
                 );
@@ -315,7 +328,7 @@ impl<'backend> AinExecutor<'backend> {
                     Some(account) => account.code_hash != contract.codehash,
                 };
                 if mismatch {
-                    debug!(
+                    trace!(
                         "[execute_tx] {} failed with as transferdomain account codehash mismatch",
                         direction
                     );
@@ -330,11 +343,10 @@ impl<'backend> AinExecutor<'backend> {
                     let storage = bridge_dfi(self.backend, amount, direction)?;
                     self.update_storage(fixed_address, storage)?;
                     self.add_balance(fixed_address, amount)?;
-                    self.commit();
                 }
 
                 let (tx_response, receipt) =
-                    self.exec(&signed_tx, U256::MAX, U256::zero(), true)?;
+                    self.exec(&signed_tx, U256::MAX, U256::zero(), true, ctx)?;
                 if !tx_response.exit_reason.is_succeed() {
                     return Err(format_err!(
                         "[execute_tx] Transfer domain failed VM execution {:?}",
@@ -342,9 +354,8 @@ impl<'backend> AinExecutor<'backend> {
                     )
                     .into());
                 }
-                self.commit();
 
-                debug!(
+                trace!(
                     "[execute_tx] receipt : {:?}, exit_reason {:#?} for signed_tx : {:#x}, logs: {:x?}",
                     receipt,
                     tx_response.exit_reason,
@@ -360,6 +371,7 @@ impl<'backend> AinExecutor<'backend> {
 
                 Ok(ApplyTxResult {
                     tx: signed_tx,
+                    exec_flag: true,
                     used_gas: U256::zero(),
                     logs: tx_response.logs,
                     gas_fee: U256::zero(),
@@ -385,7 +397,7 @@ impl<'backend> AinExecutor<'backend> {
                 let input = signed_tx.data();
                 let amount = U256::from_big_endian(&input[100..132]);
 
-                debug!(
+                trace!(
                     "[execute_tx] DST20Bridge from {}, contract_address {}, amount {}, direction {}",
                     signed_tx.sender, contract_address, amount, direction
                 );
@@ -394,21 +406,14 @@ impl<'backend> AinExecutor<'backend> {
                     let DST20BridgeInfo { address, storage } =
                         bridge_dst20_in(self.backend, contract_address, amount)?;
                     self.update_storage(address, storage)?;
-                    self.commit();
                 }
 
                 let allowance = dst20_allowance(direction, signed_tx.sender, amount);
                 self.update_storage(contract_address, allowance)?;
-                self.commit();
 
                 let (tx_response, receipt) =
-                    self.exec(&signed_tx, U256::MAX, U256::zero(), true)?;
+                    self.exec(&signed_tx, U256::MAX, U256::zero(), true, ctx)?;
                 if !tx_response.exit_reason.is_succeed() {
-                    debug!(
-                        "[execute_tx] DST20 bridge failed VM execution {:?}, data {}",
-                        tx_response.exit_reason,
-                        hex::encode(&tx_response.data)
-                    );
                     return Err(format_err!(
                         "[execute_tx] DST20 bridge failed VM execution {:?}, data {:?}",
                         tx_response.exit_reason,
@@ -417,9 +422,7 @@ impl<'backend> AinExecutor<'backend> {
                     .into());
                 }
 
-                self.commit();
-
-                debug!(
+                trace!(
                     "[execute_tx] receipt : {:?}, exit_reason {:#?} for signed_tx : {:#x}, logs: {:x?}",
                     receipt,
                     tx_response.exit_reason,
@@ -435,6 +438,7 @@ impl<'backend> AinExecutor<'backend> {
 
                 Ok(ApplyTxResult {
                     tx: signed_tx,
+                    exec_flag: true,
                     used_gas: U256::zero(),
                     logs: tx_response.logs,
                     gas_fee: U256::zero(),
@@ -447,19 +451,54 @@ impl<'backend> AinExecutor<'backend> {
                 address,
                 token_id,
             })) => {
-                debug!(
+                trace!(
                     "[execute_tx] DeployContract for address {:x?}, name {}, symbol {}",
-                    address, name, symbol
+                    address,
+                    name,
+                    symbol
                 );
 
                 let DeployContractInfo {
                     address,
                     bytecode,
                     storage,
-                } = dst20_deploy_info(self.backend, address, &name, &symbol)?;
+                } = dst20_deploy_info(
+                    self.backend,
+                    ctx.map_or(0, |c| c.dvm_block),
+                    address,
+                    &name,
+                    &symbol,
+                )?;
 
                 self.deploy_contract(address, bytecode, storage)?;
                 let (tx, receipt) = dst20_deploy_contract_tx(token_id, &base_fee)?;
+
+                Ok(ApplyTxResult {
+                    tx,
+                    exec_flag: true,
+                    used_gas: U256::zero(),
+                    logs: Vec::new(),
+                    gas_fee: U256::zero(),
+                    receipt: (receipt, Some(address)),
+                })
+            }
+            ExecuteTx::SystemTx(SystemTx::UpdateContractName(UpdateContractNameData {
+                name,
+                symbol,
+                address,
+                token_id,
+            })) => {
+                trace!(
+                    "[execute_tx] Rename contract for address {:x?}, name {}, symbol {}",
+                    address,
+                    name,
+                    symbol
+                );
+
+                let storage = dst20_name_info(ctx.map_or(0, |c| c.dvm_block), &name, &symbol);
+
+                self.update_storage(address, storage)?;
+                let (tx, receipt) = rename_contract_tx(token_id, &base_fee)?;
 
                 Ok(ApplyTxResult {
                     tx,
@@ -467,6 +506,7 @@ impl<'backend> AinExecutor<'backend> {
                     logs: Vec::new(),
                     gas_fee: U256::zero(),
                     receipt: (receipt, Some(address)),
+                    exec_flag: true,
                 })
             }
         }
@@ -476,6 +516,7 @@ impl<'backend> AinExecutor<'backend> {
 #[derive(Debug)]
 pub struct ApplyTxResult {
     pub tx: Box<SignedTx>,
+    pub exec_flag: bool,
     pub used_gas: U256,
     pub logs: Vec<Log>,
     pub gas_fee: U256,

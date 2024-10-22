@@ -9,6 +9,7 @@
 #include <chainparams.h>  // Params()
 #include <core_io.h>
 #include <dfi/evm.h>
+#include <dfi/mn_checks.h>
 #include <ffi/cxx.h>
 #include <ffi/ffihelpers.h>
 #include <primitives/transaction.h>
@@ -24,8 +25,7 @@ std::optional<CTokensView::CTokenImpl> CTokensView::GetToken(DCT_ID id) const {
     return ReadBy<ID, CTokenImpl>(id);
 }
 
-std::optional<std::pair<DCT_ID, std::optional<CTokensView::CTokenImpl>>> CTokensView::GetToken(
-    const std::string &symbolKey) const {
+std::optional<CTokensView::TokenIDPair> CTokensView::GetToken(const std::string &symbolKey) const {
     DCT_ID id;
     if (ReadBy<Symbol, std::string>(symbolKey, id)) {
         return std::make_pair(id, GetToken(id));
@@ -69,9 +69,8 @@ Res CTokensView::CreateDFIToken() {
 }
 
 ResVal<DCT_ID> CTokensView::CreateToken(const CTokensView::CTokenImpl &token,
-                                        bool isPreBayfront,
-                                        bool shouldCreateDst20,
-                                        const std::shared_ptr<CScopedTemplateID> &evmTemplateId) {
+                                        BlockContext &blockCtx,
+                                        bool isPreBayfront) {
     if (GetTokenByCreationTx(token.creationTx)) {
         return Res::Err("token with creation tx %s already exists!", token.creationTx.ToString());
     }
@@ -103,14 +102,37 @@ ResVal<DCT_ID> CTokensView::CreateToken(const CTokensView::CTokenImpl &token,
                       id.ToString().c_str());
         }
 
-        if (shouldCreateDst20) {
+        const auto evmEnabled = blockCtx.GetEVMEnabledForBlock();
+        const auto &evmTemplate = blockCtx.GetEVMTemplate();
+        const auto &height = blockCtx.GetHeight();
+        if (evmEnabled && evmTemplate) {
             CrossBoundaryResult result;
-            evm_try_create_dst20(result,
-                                 evmTemplateId->GetTemplateID(),
-                                 token.creationTx.GetHex(),
-                                 rust::string(token.name.c_str()),
-                                 rust::string(token.symbol.c_str()),
-                                 id.v);
+            rust::string token_name{};
+            rust::string token_symbol{};
+            if (height >= static_cast<uint32_t>(Params().GetConsensus().DF23Height)) {
+                if (token.name.size() > CToken::POST_METACHAIN_TOKEN_NAME_BYTE_SIZE) {
+                    return Res::Err("Error creating DST20 token, token name is larger than max bytes\n");
+                }
+                token_name = rs_try_from_utf8(result, ffi_from_string_to_slice(token.name));
+                if (!result.ok) {
+                    return Res::Err("Error creating DST20 token, token name not valid UTF-8\n");
+                }
+                token_symbol = rs_try_from_utf8(result, ffi_from_string_to_slice(token.symbol));
+                if (!result.ok) {
+                    return Res::Err("Error creating DST20 token, token symbol not valid UTF-8\n");
+                }
+            } else {
+                token_name = rust::string(token.name);
+                token_symbol = rust::string(token.symbol);
+            }
+            evm_try_unsafe_create_dst20(result,
+                                        evmTemplate->GetTemplate(),
+                                        token.creationTx.GetByteArray(),
+                                        DST20TokenInfo{
+                                            id.v,
+                                            token_name,
+                                            token_symbol,
+                                        });
             if (!result.ok) {
                 return Res::Err("Error creating DST20 token: %s", result.reason);
             }
@@ -126,16 +148,22 @@ ResVal<DCT_ID> CTokensView::CreateToken(const CTokensView::CTokenImpl &token,
     return {id, Res::Ok()};
 }
 
-Res CTokensView::UpdateToken(const CTokenImpl &newToken, bool isPreBayfront, const bool tokenSplitUpdate) {
+Res CTokensView::UpdateToken(UpdateTokenContext &ctx) {
+    // checkFinalised is always true before the bayfront fork.
+    const auto checkFinalised = ctx.checkFinalised;
+    const auto tokenSplitUpdate = ctx.tokenSplitUpdate;
+    const auto checkSymbol = ctx.checkSymbol;
+    auto &blockCtx = ctx.blockCtx;
+    auto &newToken = ctx.newToken;
+
     auto pair = GetTokenByCreationTx(newToken.creationTx);
     if (!pair) {
         return Res::Err("token with creationTx %s does not exist!", newToken.creationTx.ToString());
     }
 
-    DCT_ID id = pair->first;
-    CTokenImpl &oldToken = pair->second;
+    auto &[id, oldToken] = *pair;
 
-    if (!isPreBayfront) {
+    if (checkFinalised) {
         // for compatibility, in potential case when someone cheat and create finalized token with old node (and then
         // alter dat for ex.)
         if (oldToken.IsFinalized()) {
@@ -143,14 +171,21 @@ Res CTokensView::UpdateToken(const CTokenImpl &newToken, bool isPreBayfront, con
         }
     }
 
-    // 'name' and 'symbol' were trimmed in 'Apply'
-    oldToken.name = newToken.name;
+    // Remove deprecated prefix before symbol check, will be added if required after.
+    if (newToken.symbol.rfind(CToken::DeprecationPrefix(), 0) == 0) {
+        newToken.symbol.erase(0, CToken::DeprecationPrefix().length());
+    }
 
     // check new symbol correctness
-    if (!tokenSplitUpdate) {
+    if (checkSymbol) {
         if (auto res = newToken.IsValidSymbol(); !res) {
             return res;
         }
+    }
+
+    // Add deprecated prefix
+    if (newToken.IsDeprecated()) {
+        newToken.symbol = CToken::DeprecationPrefix() + newToken.symbol;
     }
 
     // deal with DB symbol indexes before touching symbols/DATs:
@@ -167,8 +202,45 @@ Res CTokensView::UpdateToken(const CTokenImpl &newToken, bool isPreBayfront, con
         WriteBy<Symbol>(newSymbolKey, id);
     }
 
-    // apply DAT flag and symbol only AFTER dealing with symbol indexes:
+    const auto height = blockCtx.GetHeight();
+    const auto &consensus = blockCtx.GetConsensus();
+    if (height >= consensus.DF23Height && oldToken.IsDAT() &&
+        (oldToken.symbol != newToken.symbol || oldToken.name != newToken.name)) {
+        const auto evmEnabled = blockCtx.GetEVMEnabledForBlock();
+        const auto &evmTemplate = blockCtx.GetEVMTemplate();
+
+        if (evmEnabled && evmTemplate) {
+            const auto &hash = ctx.hash;
+            CrossBoundaryResult result;
+            if (newToken.name.size() > CToken::POST_METACHAIN_TOKEN_NAME_BYTE_SIZE) {
+                return Res::Err("Error updating DST20 token, token name is larger than max bytes\n");
+            }
+            const auto token_name = rs_try_from_utf8(result, ffi_from_string_to_slice(newToken.name));
+            if (!result.ok) {
+                return Res::Err("Error updating DST20 token, token name not valid UTF-8\n");
+            }
+            const auto token_symbol = rs_try_from_utf8(result, ffi_from_string_to_slice(newToken.symbol));
+            if (!result.ok) {
+                return Res::Err("Error updating DST20 token, token symbol not valid UTF-8\n");
+            }
+            evm_try_unsafe_rename_dst20(result,
+                                        evmTemplate->GetTemplate(),
+                                        hash.GetByteArray(),  // Can be either TX or block hash depending on the source
+                                        DST20TokenInfo{
+                                            id.v,
+                                            token_name,
+                                            token_symbol,
+                                        });
+            if (!result.ok) {
+                return Res::Err("Error updating DST20 token: %s", result.reason);
+            }
+        }
+    }
+
+    // 'name' and 'symbol' were trimmed in 'Apply'
+    oldToken.name = newToken.name;
     oldToken.symbol = newToken.symbol;
+
     if (oldToken.IsDAT() != newToken.IsDAT()) {
         oldToken.flags ^= (uint8_t)CToken::TokenFlags::DAT;
     }
@@ -196,6 +268,10 @@ Res CTokensView::UpdateToken(const CTokenImpl &newToken, bool isPreBayfront, con
 
     if (oldToken.destructionTx != newToken.destructionTx) {
         oldToken.destructionTx = newToken.destructionTx;
+    }
+
+    if (oldToken.IsDeprecated() != newToken.IsDeprecated()) {
+        oldToken.flags ^= (uint8_t)CToken::TokenFlags::Deprecated;
     }
 
     WriteBy<ID>(id, oldToken);
@@ -299,4 +375,45 @@ inline Res CTokenImplementation::IsValidSymbol() const {
         };
     }
     return Res::Ok();
+}
+
+void CTokensView::SetTokenSplitMultiplier(const uint32_t oldId,
+                                          const uint32_t newId,
+                                          const SplitMultiplier multiplier) {
+    WriteBy<TokenSplitMultiplier>(oldId, std::make_pair(newId, multiplier));
+}
+
+std::optional<std::pair<uint32_t, CTokensView::SplitMultiplier>> CTokensView::GetTokenSplitMultiplier(
+    const uint32_t id) const {
+    std::pair<uint32_t, SplitMultiplier> idMultiplierPair;
+    if (ReadBy<TokenSplitMultiplier, uint32_t>(id, idMultiplierPair)) {
+        return idMultiplierPair;
+    }
+
+    return {};
+}
+
+void CTokensView::SetNewTokenCollateral(const uint256 &txid, const uint32_t tokenID) {
+    WriteBy<NewTokenCollateralTXID>(txid, tokenID);
+    WriteBy<NewTokenCollateralID>(tokenID, txid);
+}
+
+[[nodiscard]] bool CTokensView::NewTokenCollateralExists(const uint256 &txid) const {
+    if (const auto id = ReadBy<NewTokenCollateralTXID, uint32_t>(txid)) {
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] uint256 CTokensView::GetNewTokenCollateralTXID(const uint32_t tokenID) const {
+    if (const auto txid = ReadBy<NewTokenCollateralID, uint256>(tokenID)) {
+        return *txid;
+    }
+    return {};
+}
+
+void CTokensView::EraseNewTokenCollateral(const uint32_t tokenID) {
+    const auto txid = GetNewTokenCollateralTXID(tokenID);
+    EraseBy<NewTokenCollateralTXID>(txid);
+    EraseBy<NewTokenCollateralID>(tokenID);
 }

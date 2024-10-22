@@ -5,7 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ain_cpp_imports::Attributes;
 use ethereum::{BlockAny, TransactionV2};
 use ethereum_types::{H160, U256};
 use keccak_hash::H256;
@@ -22,7 +21,7 @@ pub trait BlockStorage {
 }
 
 pub trait TransactionStorage {
-    fn extend_transactions_from_block(&self, block: &BlockAny) -> Result<()>;
+    fn put_transactions_from_block(&self, block: &BlockAny) -> Result<()>;
     fn get_transaction_by_hash(&self, hash: &H256) -> Result<Option<TransactionV2>>;
     fn get_transaction_by_block_hash_and_index(
         &self,
@@ -34,7 +33,6 @@ pub trait TransactionStorage {
         number: &U256,
         index: usize,
     ) -> Result<Option<TransactionV2>>;
-    fn put_transaction(&self, transaction: &TransactionV2) -> Result<()>;
 }
 
 pub trait ReceiptStorage {
@@ -53,11 +51,6 @@ pub trait FlushableStorage {
 
 pub trait Rollback {
     fn disconnect_latest_block(&self) -> Result<()>;
-}
-
-pub trait AttributesStorage {
-    fn put_attributes(&self, attributes: Option<&Attributes>) -> Result<()>;
-    fn get_attributes(&self) -> Result<Option<Attributes>>;
 }
 
 pub trait PersistentState {

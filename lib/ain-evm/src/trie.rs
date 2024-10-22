@@ -34,7 +34,6 @@ impl Default for TrieDBStore {
 
 impl TrieDBStore {
     pub fn new() -> Self {
-        debug!("Creating new trie store");
         let trie_store = MptStore::new();
         let mut trie = trie_store
             .trie_create(&[0], None, false)
@@ -66,6 +65,7 @@ impl TrieDBStore {
             Arc::clone(trie_store),
             Arc::clone(storage),
             Vicinity::default(),
+            None,
         )
         .expect("Could not restore backend");
 
@@ -91,11 +91,10 @@ impl TrieDBStore {
                         false,
                     )
                     .expect("Could not set account data");
-                backend.commit();
             }
         }
 
-        let state_root = backend.commit();
+        let state_root = backend.commit(false)?;
         debug!("Loaded genesis state_root : {:#x}", state_root);
         Ok((state_root, genesis))
     }

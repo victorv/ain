@@ -72,7 +72,7 @@ public:
         UNKNOWN  // unreachable
     };
 
-    enum TimeLock { ZEROYEAR, FIVEYEAR = 260, TENYEAR = 520 };
+    enum TimeLock : uint16_t { ZEROYEAR, FIVEYEAR = 260, TENYEAR = 520 };
 
     enum Version : int32_t {
         PRE_FORT_CANNING = -1,
@@ -142,6 +142,8 @@ public:
     friend bool operator==(const CMasternode &a, const CMasternode &b);
     friend bool operator!=(const CMasternode &a, const CMasternode &b);
 };
+
+uint8_t GetTimelockLoops(const uint16_t timelock, const int blockHeight);
 
 struct CCreateMasterNodeMessage {
     char operatorType;
@@ -496,14 +498,15 @@ class CCustomCSView : public CMasternodesView,
             CTeamView               ::  AuthTeam, ConfirmTeam, CurrentTeam,
             CFoundationsDebtView    ::  Debt,
             CAnchorRewardsView      ::  BtcTx,
-            CTokensView             ::  ID, Symbol, CreationTx, LastDctId,
-            CAccountsView           ::  ByBalanceKey, ByHeightKey, ByFuturesSwapKey,
+            CTokensView             ::  ID, Symbol, CreationTx, LastDctId, TokenSplitMultiplier, NewTokenCollateralTXID, NewTokenCollateralID,
+            CAccountsView           ::  ByBalanceKey, ByHeightKey, ByFuturesSwapKey, ByTokenLockKey, ByFuturesDUSDKey,
             CCommunityBalancesView  ::  ById,
             CUndosView              ::  ByUndoKey,
             CPoolPairView           ::  ByID, ByPair, ByShare, ByIDPair, ByPoolSwap, ByReserves, ByRewardPct, ByRewardLoanPct,
                                         ByPoolReward, ByDailyReward, ByCustomReward, ByTotalLiquidity, ByDailyLoanReward,
-                                        ByPoolLoanReward, ByTokenDexFeePct,
-            CGovView                ::  ByName, ByHeightVars,
+                                        ByPoolLoanReward, ByTokenDexFeePct, ByLoanTokenLiquidityPerBlock, ByLoanTokenLiquidityAverage,
+                                        ByTotalRewardPerShare, ByTotalLoanRewardPerShare, ByTotalCustomRewardPerShare, ByTotalCommissionPerShare,
+            CGovView                ::  ByName, ByHeightVars, ByUnsetHeightVars,
             CAnchorConfirmsView     ::  BtcTx,
             COracleView             ::  ByName, FixedIntervalBlockKey, FixedIntervalPriceKey, PriceDeviation,
             CICXOrderView           ::  ICXOrderCreationTx, ICXMakeOfferCreationTx, ICXSubmitDFCHTLCCreationTx,
@@ -516,9 +519,9 @@ class CCustomCSView : public CMasternodesView,
                                         LoanSetLoanTokenKey, LoanSchemeKey, DefaultLoanSchemeKey, DelayedLoanSchemeKey,
                                         DestroyLoanSchemeKey, LoanInterestByVault, LoanTokenAmount, LoanLiquidationPenalty, LoanInterestV2ByVault,
                                         LoanInterestV3ByVault,
-            CVaultView              ::  VaultKey, OwnerVaultKey, CollateralKey, AuctionBatchKey, AuctionHeightKey, AuctionBidKey,
+            CVaultView              ::  VaultKey, OwnerVaultKey, CollateralKey, AuctionBatchKey, AuctionHeightKey, AuctionBidKey, HeightAndFeeKey,
             CSettingsView           ::  KVSettings,
-            CProposalView           ::  ByType, ByCycle, ByMnVote, ByStatus,
+            CProposalView           ::  ByType, ByCycle, ByMnVote, ByStatus, ByVoting,
             CVMDomainGraphView      ::  VMDomainBlockEdge, VMDomainTxEdge
         >();
     }
@@ -546,10 +549,14 @@ public:
     // Increase version when underlaying tables are changed
     static constexpr const int DbVersion = 1;
 
+    // Normal constructors
     CCustomCSView();
     explicit CCustomCSView(CStorageKV &st);
 
-    // cache-upon-a-cache (not a copy!) constructor
+    // Snapshot constructor
+    explicit CCustomCSView(std::unique_ptr<CStorageLevelDB> &st, MapKV &changed);
+
+    // Cache-upon-a-cache constructors
     CCustomCSView(CCustomCSView &other);
     CCustomCSView(CCustomCSView &other,
                   CAccountHistoryStorage *historyView,
@@ -606,7 +613,6 @@ public:
 
     uint256 MerkleRoot();
 
-    // virtual CHistoryWriters& GetHistoryWriters() { return writers; }
     virtual CHistoryWriters &GetHistoryWriters() { return writers; }
 
     // we construct it as it

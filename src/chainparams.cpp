@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <fstream>
 
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
@@ -140,7 +141,9 @@ public:
         consensus.DF19FortCanningEpilogueHeight = 2257500; // Sep 22nd, 2022.
         consensus.DF20GrandCentralHeight = 2479000; // Dec 8th, 2022.
         consensus.DF21GrandCentralEpilogueHeight = 2574000; // Jan 10th, 2023.
-        consensus.DF22MetachainHeight = std::numeric_limits<int>::max();
+        consensus.DF22MetachainHeight = 3462000; // Nov 15th, 2023.
+        consensus.DF23Height = 4006000; // May 23th, 2024.
+        consensus.DF24Height = 4463000; // Oct 29th, 2024.
 
         consensus.pos.diffLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 //        consensus.pos.nTargetTimespan = 14 * 24 * 60 * 60; // two weeks
@@ -273,6 +276,7 @@ public:
         consensus.smartContracts[SMART_CONTRACT_DFIP_2201] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0})));
         consensus.smartContracts[SMART_CONTRACT_DFIP_2203] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1})));
         consensus.smartContracts[SMART_CONTRACT_DFIP2206F] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2})));
+        consensus.smartContracts[SMART_CONTRACT_TOKENLOCK] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3})));
 
         // owner base58, operator base58
         vMasternodes.push_back({"8PuErAcazqccCVzRcc8vJ3wFaZGm4vFbLe", "8J846CKFF83Jcj5m4EReJmxiaJ6Jy1Y6Ea"});
@@ -361,8 +365,20 @@ public:
                 {2500000,uint256S("cf1df1124af59b9928fac48947883206dd33d165022086bee9d5001d047395da")},
                 {2600000,uint256S("af065074bb15c3583abcd3e7c22035a026cfd8d3fbc72d890fcd8b435cd8b7b4")},
                 {2700000,uint256S("3cf74bcaea19d457c7d8e7896177035e3e446f41ee2ac72dbfb25ac2072f49c5")},
-                {3310000,uint256S("87584e474d74a5bdea797ef684ab8c1347bed6baad26a9d1a0e00032c8d68bfa")},
-
+                {2800000,uint256S("e4a4b8961e5bc591892937f95a45b41ea35b653a4f98309973b86c95a3b38036")},
+                {2900000,uint256S("58b47020bbf8db5c7b4c5a9aa187288b0de404c794d33917bcba7d311680edc6")},
+                {3000000,uint256S("3fdfc99b955b6e994425d9702d529fd7a2db89805bc40f1e8d083f691ede20d7")},
+                {3100000,uint256S("5f77e698c51b65e606518c644b9b218005962877b3476cbe5f40fe5dc7b93663")},
+                {3200000,uint256S("574cea827d87c657396cb5142066e9e8ca83ab153e5350bf9c18328c0d456910")},
+                {3300000,uint256S("399a3617dbcf8cfe6bc4ef6cac961d617120a42db95180961db549b867ded8e7")},
+                {3400000,uint256S("83b2c5860f25cf411b722e5d127c0855dc7a514a1eed28279aab2a77f1ba0028")},
+                {3500000,uint256S("bf4c732e9a55d13f9a5d4b3c3a224232079251ea983c6c6c2a5fa5d5e91f12e9")},
+                {3600000,uint256S("cd7fb7dd41b2f77a6895133d15b81a4294663963512d756c75e6974e09a1e335")},
+                {3700000,uint256S("e579ea61173bce909b2bf13f2ede98c1025cef51350209953f235209a73bad01")},
+                {3800000,uint256S("8930b8a43a6413dc8739bec47123b0bb556f6ce2dac3583acefa533b966cb719")},
+                {3900000,uint256S("1118ddefb8b3c550421ccd71bf13794f0969f2f72f6ab72e0bf411e21a7bce96")},
+                {4000000,uint256S("bc04577f86b72eb5fb4db79fb19a1f019afa6378ce6ef7e6401d3e14f55d6cb4")},
+                {4100000,uint256S("5a173418adc9a1aa5bab4370871b2526771ec81ea445e963971bfafe88cba4b5")},
             }
         };
 
@@ -418,6 +434,8 @@ public:
         consensus.DF20GrandCentralHeight = 1150020;
         consensus.DF21GrandCentralEpilogueHeight = 1150030;
         consensus.DF22MetachainHeight = 1150040;
+        consensus.DF23Height = 1507200;
+        consensus.DF24Height = 1810800;
 
         consensus.pos.diffLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 //        consensus.pos.nTargetTimespan = 14 * 24 * 60 * 60; // two weeks
@@ -541,6 +559,7 @@ public:
         consensus.smartContracts[SMART_CONTRACT_DFIP_2201] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0})));
         consensus.smartContracts[SMART_CONTRACT_DFIP_2203] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1})));
         consensus.smartContracts[SMART_CONTRACT_DFIP2206F] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2})));
+        consensus.smartContracts[SMART_CONTRACT_TOKENLOCK] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3})));
 
         // owner base58, operator base58
         vMasternodes.push_back({"7LMorkhKTDjbES6DfRxX2RiNMbeemUkxmp", "7KEu9JMKCx6aJ9wyg138W3p42rjg19DR5D"});
@@ -636,6 +655,8 @@ public:
         consensus.DF20GrandCentralHeight = 1366000;
         consensus.DF21GrandCentralEpilogueHeight = 1438200;
         consensus.DF22MetachainHeight = 1586750;
+        consensus.DF23Height = 1985600;
+        consensus.DF24Height = 2241000;
 
         consensus.pos.diffLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         consensus.pos.nTargetTimespan = 5 * 60; // 5 min == 10 blocks
@@ -757,6 +778,7 @@ public:
         consensus.smartContracts[SMART_CONTRACT_DFIP_2201] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0})));
         consensus.smartContracts[SMART_CONTRACT_DFIP_2203] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1})));
         consensus.smartContracts[SMART_CONTRACT_DFIP2206F] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2})));
+        consensus.smartContracts[SMART_CONTRACT_TOKENLOCK] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3})));
 
         // owner base58, operator base58
         vMasternodes.push_back({"7LMorkhKTDjbES6DfRxX2RiNMbeemUkxmp", "7KEu9JMKCx6aJ9wyg138W3p42rjg19DR5D"});
@@ -851,6 +873,8 @@ public:
         consensus.DF20GrandCentralHeight = 1366000;
         consensus.DF21GrandCentralEpilogueHeight = 1438200;
         consensus.DF22MetachainHeight = 1586750;
+        consensus.DF23Height = std::numeric_limits<int>::max();
+        consensus.DF24Height = std::numeric_limits<int>::max();
 
         consensus.pos.diffLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         consensus.pos.nTargetTimespan = 5 * 60; // 5 min == 10 blocks
@@ -971,6 +995,7 @@ public:
         consensus.smartContracts[SMART_CONTRACT_DFIP_2201] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0})));
         consensus.smartContracts[SMART_CONTRACT_DFIP_2203] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1})));
         consensus.smartContracts[SMART_CONTRACT_DFIP2206F] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2})));
+        consensus.smartContracts[SMART_CONTRACT_TOKENLOCK] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3})));
 
         // owner base58, operator base58
         vMasternodes.push_back({"7LMorkhKTDjbES6DfRxX2RiNMbeemUkxmp", "7KEu9JMKCx6aJ9wyg138W3p42rjg19DR5D"});
@@ -1070,6 +1095,8 @@ public:
         consensus.DF20GrandCentralHeight = 10000000;
         consensus.DF21GrandCentralEpilogueHeight = 10000000;
         consensus.DF22MetachainHeight = 10000000;
+        consensus.DF23Height = 10000000;
+        consensus.DF24Height = 10000000;
 
         consensus.pos.diffLimit = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         consensus.pos.nTargetTimespan = 14 * 24 * 60 * 60; // two weeks
@@ -1194,6 +1221,7 @@ public:
         consensus.smartContracts[SMART_CONTRACT_DFIP_2201] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0})));
         consensus.smartContracts[SMART_CONTRACT_DFIP_2203] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1})));
         consensus.smartContracts[SMART_CONTRACT_DFIP2206F] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2})));
+        consensus.smartContracts[SMART_CONTRACT_TOKENLOCK] = GetScriptForDestination(CTxDestination(WitnessV0KeyHash(std::vector<unsigned char>{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3})));
 
 
         struct KeyPairString {
@@ -1315,6 +1343,7 @@ void SetupCommonArgActivationParams(Consensus::Params &consensus) {
     UpdateHeightValidation("Segwit", "-segwitheight", consensus.SegwitHeight);
     UpdateHeightValidation("AMK", "-amkheight", consensus.DF1AMKHeight);
     UpdateHeightValidation("Bayfront", "-bayfrontheight", consensus.DF2BayfrontHeight);
+    UpdateHeightValidation("Bayfront Marina", "-bayfrontmarinaheight", consensus.DF3BayfrontMarinaHeight);
     UpdateHeightValidation("Bayfront Gardens", "-bayfrontgardensheight", consensus.DF4BayfrontGardensHeight);
     UpdateHeightValidation("Clarke Quay", "-clarkequayheight", consensus.DF5ClarkeQuayHeight);
     UpdateHeightValidation("Dakota", "-dakotaheight", consensus.DF6DakotaHeight);
@@ -1337,6 +1366,8 @@ void SetupCommonArgActivationParams(Consensus::Params &consensus) {
     UpdateHeightValidation("Grand Central", "-grandcentralheight", consensus.DF20GrandCentralHeight);
     UpdateHeightValidation("Grand Central Epilogue", "-grandcentralepilogueheight", consensus.DF21GrandCentralEpilogueHeight);
     UpdateHeightValidation("Metachain", "-metachainheight", consensus.DF22MetachainHeight);
+    UpdateHeightValidation("DF23 Upgrade Height", "-df23height", consensus.DF23Height);
+    UpdateHeightValidation("DF24 Upgrade Height", "-df24height", consensus.DF24Height);
 
     if (gArgs.GetBoolArg("-simulatemainnet", false)) {
         consensus.pos.nTargetTimespan = 5 * 60; // 5 min == 10 blocks
@@ -1466,7 +1497,7 @@ void ClearCheckpoints(CChainParams &params) {
 }
 
 Res UpdateCheckpointsFromFile(CChainParams &params, const std::string &fileName) {
-    std::ifstream file(fileName);
+    std::ifstream file(fs::PathFromString(fileName));
     if (!file.good()) {
         return Res::Err("Could not read %s. Ensure it exists and has read permissions", fileName);
     }
