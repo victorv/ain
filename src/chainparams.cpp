@@ -587,8 +587,8 @@ public:
         vFixedSeeds.clear();
         vSeeds.clear();
         // nodes with support for servicebits filtering should be at the top
-        vSeeds.emplace_back("testnet-seed.defichain.io");
-        vSeeds.emplace_back("35.195.186.78");
+        vSeeds.emplace_back("testnet-seed.mydefichain.com");
+        vSeeds.emplace_back("seeder-testnet3.defichain-status.com");
 
         vFixedSeeds = std::vector<SeedSpec6>(pnSeed6_test, pnSeed6_test + ARRAYLEN(pnSeed6_test));
 
@@ -613,7 +613,10 @@ public:
             /* nTxCount */ 178351,
             /* dTxRate  */ 0.03842042178237066
         };
+
+        UpdateActivationParametersFromArgs();
     }
+    void UpdateActivationParametersFromArgs();
 };
 
 /**
@@ -1378,8 +1381,7 @@ void SetupCommonArgActivationParams(Consensus::Params &consensus) {
     }
 }
 
-
-void CMainParams::UpdateActivationParametersFromArgs() {
+bool SetMocknet(const CChainParams &params, Consensus::Params& consensus) {
     fMockNetwork = gArgs.IsArgSet("-mocknet");
     if (fMockNetwork) {
         LogPrintf("============================================\n");
@@ -1400,19 +1402,29 @@ void CMainParams::UpdateActivationParametersFromArgs() {
 
         // Add additional foundation members here for testing
         if (!sMockFoundationPubKey.empty()) {
-            consensus.foundationMembers.insert(GetScriptForDestination(DecodeDestination(sMockFoundationPubKey, *this)));
+            consensus.foundationMembers.insert(GetScriptForDestination(DecodeDestination(sMockFoundationPubKey, params)));
             LogPrintf("mocknet: key: %s\n", sMockFoundationPubKey);
         }
 
         // Do this at the end, to ensure simualte mainnet overrides are in place.
         SetupCommonArgActivationParams(consensus);
     }
+    return fMockNetwork;
+}
+
+void CMainParams::UpdateActivationParametersFromArgs() {
+    SetMocknet(*this, consensus);
+}
+
+void CTestNetParams::UpdateActivationParametersFromArgs() {
+    SetMocknet(*this, consensus);
 }
 
 void CChangiParams::UpdateActivationParametersFromArgs() {
+    if (SetMocknet(*this, consensus)) { return; }
     if (gArgs.IsArgSet("-changi-bootstrap")) {
         nDefaultPort = 18555;
-        vSeeds.emplace_back("changi-seed.defichain.io");
+        vSeeds.emplace_back("changi-seed.mydefichain.com");
         pchMessageStartPostAMK[0] = 0x0b;
         pchMessageStartPostAMK[1] = 0x11;
         pchMessageStartPostAMK[2] = 0x09;
@@ -1421,9 +1433,10 @@ void CChangiParams::UpdateActivationParametersFromArgs() {
 }
 
 void CDevNetParams::UpdateActivationParametersFromArgs() {
+    if (SetMocknet(*this, consensus)) { return; }
     if (gArgs.IsArgSet("-devnet-bootstrap")) {
         nDefaultPort = 18555;
-        vSeeds.emplace_back("testnet-seed.defichain.io");
+        vSeeds.emplace_back("testnet-seed.mydefichain.com");
         pchMessageStartPostAMK[0] = 0x0b;
         pchMessageStartPostAMK[1] = 0x11;
         pchMessageStartPostAMK[2] = 0x09;

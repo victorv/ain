@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use ain_dftx::{Currency, Token};
-use bitcoin::{Address, ScriptBuf};
+use bitcoin::{Address, ScriptBuf, Txid};
 use defichain_rpc::json::token::TokenInfo;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -10,10 +10,11 @@ use snafu::OptionExt;
 use super::query::PaginationQuery;
 use crate::{
     error::{
-        InvalidAmountSnafu, InvalidFixedIntervalPriceSnafu, InvalidPoolPairSymbolSnafu,
-        InvalidTokenCurrencySnafu,
+        Error::ToArrayError, InvalidAmountSnafu, InvalidFixedIntervalPriceSnafu,
+        InvalidPoolPairSymbolSnafu, InvalidPriceTickerSortKeySnafu, InvalidTokenCurrencySnafu,
     },
     hex_encoder::as_sha256,
+    model::PriceTickerId,
     network::Network,
     Result,
 };
@@ -112,6 +113,46 @@ pub fn parse_query_height_txno(item: &str) -> Result<(u32, usize)> {
     let txno = txno.parse::<usize>()?;
 
     Ok((height, txno))
+}
+
+pub fn parse_query_height_txid(item: &str) -> Result<(u32, Txid)> {
+    let mut parts = item.split('-');
+    let encoded_height = parts.next().context(InvalidAmountSnafu { item })?;
+    let txid = parts.next().context(InvalidAmountSnafu { item })?;
+
+    let height_in_bytes: [u8; 4] = hex::decode(encoded_height)?
+        .try_into()
+        .map_err(|_| ToArrayError)?;
+    let height = u32::from_be_bytes(height_in_bytes);
+    let txid = txid.parse::<Txid>()?;
+
+    Ok((height, txid))
+}
+
+pub fn parse_price_ticker_sort(item: &str) -> Result<PriceTickerId> {
+    let mut parts = item.split('-');
+    let count_height_token = parts
+        .next()
+        .context(InvalidPriceTickerSortKeySnafu { item })?;
+    let encoded_count = &count_height_token[..8];
+    let encoded_height = &count_height_token[8..16];
+    let token = &count_height_token[16..];
+    let token = token.to_string();
+
+    let count: [u8; 4] = hex::decode(encoded_count)?
+        .try_into()
+        .map_err(|_| ToArrayError)?;
+
+    let height: [u8; 4] = hex::decode(encoded_height)?
+        .try_into()
+        .map_err(|_| ToArrayError)?;
+
+    let currency = parts
+        .next()
+        .context(InvalidTokenCurrencySnafu { item })?
+        .to_string();
+
+    Ok((count, height, token, currency))
 }
 
 #[must_use]

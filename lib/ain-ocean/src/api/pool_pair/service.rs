@@ -21,7 +21,7 @@ use crate::{
         NotFoundKind, OtherSnafu,
     },
     indexer::PoolSwapAggregatedInterval,
-    model::{PoolSwap, PoolSwapAggregatedAggregated},
+    model::{PoolSwap, PoolSwapAggregatedAggregated, PoolSwapKey},
     storage::{RepositoryOps, SecondaryIndex, SortOrder},
     Result,
 };
@@ -594,22 +594,22 @@ fn call_dftx(ctx: &Arc<AppContext>, txid: Txid) -> Result<Option<DfTx>> {
         .transaction
         .vout_by_id
         .list(Some((txid, 0)), SortOrder::Ascending)?
-        .take(1)
         .take_while(|item| match item {
             Ok((_, vout)) => vout.txid == txid,
             _ => true,
         })
+        .next()
+        .transpose()?
         .map(|item| {
-            let (_, v) = item?;
-            Ok(v)
-        })
-        .collect::<Result<Vec<_>>>()?;
+            let (_, v) = item;
+            v
+        });
 
-    if vout.is_empty() {
+    let Some(vout) = vout else {
         return Ok(None);
-    }
+    };
 
-    let bytes = &vout[0].script.hex;
+    let bytes = &vout.script.hex;
     if bytes.len() > 6 && bytes[0] == 0x6a && bytes[1] <= 0x4e {
         let offset = 1 + match bytes[1] {
             0x4c => 2,
@@ -673,6 +673,7 @@ pub async fn find_swap_from(
 
 pub async fn find_swap_to(
     ctx: &Arc<AppContext>,
+    swap_key: &PoolSwapKey,
     swap: &PoolSwap,
 ) -> Result<Option<PoolSwapFromToData>> {
     let PoolSwap {
@@ -689,9 +690,20 @@ pub async fn find_swap_to(
 
     let display_symbol = parse_display_symbol(&to_token);
 
+    // TODO Index to_amount if missing
+    if to_amount.is_none() {
+        let amount = 0;
+        let swap = PoolSwap {
+            to_amount: Some(amount),
+            ..swap.clone()
+        };
+        ctx.services.pool.by_id.put(swap_key, &swap)?;
+    }
+
     Ok(Some(PoolSwapFromToData {
         address: to_address,
-        amount: Decimal::new(to_amount.to_owned(), 8).to_string(),
+        // amount: Decimal::new(to_amount.to_owned(), 8).to_string(), // Need fallback
+        amount: Decimal::new(to_amount.to_owned().unwrap_or_default(), 8).to_string(),
         symbol: to_token.symbol,
         display_symbol,
     }))

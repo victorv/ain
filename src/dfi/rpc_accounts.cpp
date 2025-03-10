@@ -3668,6 +3668,9 @@ UniValue logdvmstate(const JSONRPCRequest &request) {
         pcursor->Next();
     }
 
+    // Delete iterator
+    delete pcursor;
+
     if (outFile.is_open()) {
         outFile.close();
     }
@@ -3694,50 +3697,37 @@ UniValue logdbhashes(const JSONRPCRequest &request) {
     pcustomcsview->Flush();
     pcustomcsDB->Flush();
 
-    // Get the CDBWrapper instance from CCustomCSView
-    auto db = pcustomcsview->GetStorage().GetStorageLevelDB()->GetDB();
-
-    // Create a CDBIterator
-    auto pcursor = db->NewIterator(leveldb::ReadOptions());
-
-    // Create a SHA256 hasher
-    CSHA256 hasher;
-
-    // Seek to the beginning of the database
-    pcursor->SeekToFirst();
-
-    // Iterate over all key-value pairs
-    while (pcursor->Valid()) {
-        // Get the key and value slices
-        auto keySlice = pcursor->GetKey();
-        auto valueSlice = pcursor->GetValue();
-
-        // Feed the key and value into the hasher
-        hasher.Write((const unsigned char *)keySlice.data(), keySlice.size());
-        hasher.Write((const unsigned char *)valueSlice.data(), valueSlice.size());
-
-        // Move to the next key-value pair
-        pcursor->Next();
-    }
-
-    // Finalize the hash
-    unsigned char hash[CSHA256::OUTPUT_SIZE];
-    hasher.Finalize(hash);
-
-    // Convert hash to hex string
-    const auto hashHex = HexStr(hash, hash + CSHA256::OUTPUT_SIZE);
+    auto [hashHex, hashHexNoUndo, hashHexAccount] = GetDVMDBHashes(*pcustomcsview);
 
     // Get the current block height
     const auto height = ::ChainActive().Height();
+    const auto blockHash = ::ChainActive().Tip()->GetBlockHash().ToString();
 
     // Prepare result
     UniValue result(UniValue::VOBJ);
     result.pushKV("height", height);
+    result.pushKV("blockhash", blockHash);
+    // Note that this only guaranteed to be equal with other nodes
+    // if they didn't hit undo changes at different points.
+    // Other known instance that can cause this to differ:
+    // - consolidaterewards at different points if pre-static addresses are involved.
     result.pushKV("dvmhash", hashHex);
+    result.pushKV("dvmwithoutundohash", hashHexNoUndo);
+    result.pushKV("dvmaccounthash", hashHexAccount);
 
-    const auto evmHashHex = XResultValueLogged(evm_try_get_hash_db_state(result));
-    if (evmHashHex) {
-        result.pushKV("evmhash", std::string(*evmHashHex));
+    auto res = XResultValueLogged(evm_try_get_latest_block_hash(result));
+    if (res) {
+        // Only available after EVM activation
+        // EVM block hash already is inclusive of all it's
+        // state, so we don't need to do the DVM shenangins.
+        auto evmBlockHash = uint256::FromByteArray(*res).GetHex();
+        result.pushKV("evmhash", evmBlockHash);
+    }
+
+    const auto evmDbNodeHashHex = XResultValueLogged(evm_try_get_hash_db_state(result));
+    if (evmDbNodeHashHex) {
+        // Note: This can vary from node to node unlike the rest.
+        result.pushKV("varhash_evmalldb", std::string(*evmDbNodeHashHex));
     }
 
     if (gArgs.GetBoolArg("-oceanarchive", DEFAULT_OCEAN_INDEXER_ENABLED) ||

@@ -1,9 +1,10 @@
+use ain_dftx::{Currency, Token};
 use serde::{Deserialize, Serialize};
 
 use super::oracle_price_aggregated::OraclePriceAggregated;
 
-pub type PriceTickerId = (String, String); //token-currency
-pub type PriceTickerKey = (i32, u32, String, String); // total-height-token-currency
+pub type PriceTickerId = ([u8; 4], [u8; 4], Token, Currency); // total-height-token-currency
+pub type PriceTickerKey = (Token, Currency);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]

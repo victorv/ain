@@ -192,7 +192,11 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    SecondaryIndex,
+    #[snafu(display("Secondary index error"))]
+    SecondaryIndex {
+        #[snafu(implicit)]
+        location: Location,
+    },
     BadRequest {
         msg: String,
     },
@@ -204,6 +208,12 @@ pub enum Error {
     },
     #[snafu(display("Invalid fixed interval price format: {}", item))]
     InvalidFixedIntervalPrice {
+        item: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid price ticker sort key: {}", item))]
+    InvalidPriceTickerSortKey {
         item: String,
         #[snafu(implicit)]
         location: Location,
@@ -226,6 +236,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    ToArrayError,
     #[snafu(display("{}", msg))]
     Other {
         msg: String,

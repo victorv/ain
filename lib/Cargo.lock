@@ -128,6 +128,7 @@ dependencies = [
  "bitflags 2.6.0",
  "hex",
  "lazy_static",
+ "serde",
 ]
 
 [[package]]
@@ -3512,6 +3513,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "parser"
+version = "0.1.0"
+dependencies = [
+ "ain-dftx",
+ "ain-macros",
+ "bitcoin",
+ "hex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "password-hash"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5982,7 +5995,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vsdb"
 version = "0.55.0"
-source = "git+https://github.com/defich/vsdb.git#020aaf69b36acce9547c82dca3225b8cacf68125"
+source = "git+https://github.com/defich/vsdb.git#cbb84cf3f902225f28db38b5ee52a1f6cf0f0c61"
 dependencies = [
  "once_cell",
  "parking_lot",
@@ -5994,7 +6007,7 @@ dependencies = [
 [[package]]
 name = "vsdb_core"
 version = "0.55.6"
-source = "git+https://github.com/defich/vsdb.git#020aaf69b36acce9547c82dca3225b8cacf68125"
+source = "git+https://github.com/defich/vsdb.git#cbb84cf3f902225f28db38b5ee52a1f6cf0f0c61"
 dependencies = [
  "log",
  "once_cell",
@@ -6010,7 +6023,7 @@ dependencies = [
 [[package]]
 name = "vsdb_hash_db"
 version = "0.6.0"
-source = "git+https://github.com/defich/vsdb.git#020aaf69b36acce9547c82dca3225b8cacf68125"
+source = "git+https://github.com/defich/vsdb.git#cbb84cf3f902225f28db38b5ee52a1f6cf0f0c61"
 dependencies = [
  "bcs",
  "hash-db 0.16.0",
@@ -6025,7 +6038,7 @@ dependencies = [
 [[package]]
 name = "vsdb_trie_db"
 version = "0.7.0"
-source = "git+https://github.com/defich/vsdb.git#020aaf69b36acce9547c82dca3225b8cacf68125"
+source = "git+https://github.com/defich/vsdb.git#cbb84cf3f902225f28db38b5ee52a1f6cf0f0c61"
 dependencies = [
  "ruc",
  "serde",

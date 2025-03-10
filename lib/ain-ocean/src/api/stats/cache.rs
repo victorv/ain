@@ -1,5 +1,10 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    sync::Arc,
+};
 
+use ain_dftx::{Currency, Token};
 use cached::proc_macro::cached;
 use defichain_rpc::{
     defichain_rpc_json::token::TokenPagination, json::account::AccountAmount, AccountRPC, Client,
@@ -13,7 +18,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
-use super::{subsidy::BLOCK_SUBSIDY, COIN};
+use super::{subsidy::BlockSubsidy, COIN};
 use crate::{
     api::{
         cache::list_pool_pairs_cached,
@@ -105,7 +110,11 @@ pub async fn get_count(ctx: &Arc<AppContext>) -> Result<Count> {
         .price_ticker
         .by_id
         .list(None, SortOrder::Descending)?
-        .collect::<Vec<_>>();
+        .filter_map(|item| {
+            item.ok()
+                .map(|((_, _, token, currency), _)| (token, currency))
+        })
+        .collect::<HashSet<(Token, Currency)>>();
 
     Ok(Count {
         blocks: 0,
@@ -177,9 +186,9 @@ pub struct Emission {
     key = "String",
     convert = r#"{ format!("emission") }"#
 )]
-pub fn get_emission(height: u32) -> Result<Emission> {
-    let subsidy = Decimal::from_u64(BLOCK_SUBSIDY.get_block_subsidy(height))
-        .context(DecimalConversionSnafu)?;
+pub fn get_emission(subsidy: &BlockSubsidy, height: u32) -> Result<Emission> {
+    let subsidy =
+        Decimal::from_u64(subsidy.get_block_subsidy(height)).context(DecimalConversionSnafu)?;
     let distribution = get_block_reward_distribution(subsidy);
 
     let masternode = distribution.masternode;

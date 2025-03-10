@@ -96,34 +96,32 @@ async fn get_feed(
 
     let key = (token, currency, txid);
 
-    let price_feed_list = ctx
+    let oracle_price_feeds = ctx
         .services
         .oracle_price_feed
         .by_id
         .list(None, SortOrder::Descending)?
         .paginate(&query)
         .flatten()
-        .collect::<Vec<_>>();
-
-    let mut oracle_price_feeds = Vec::new();
-
-    for ((token, currency, oracle_id, _), feed) in &price_feed_list {
-        if key.0.eq(token) && key.1.eq(currency) && key.2.eq(oracle_id) {
+        .filter(|((token, currency, oracle_id, _, _), _)| {
+            key.0.eq(token) && key.1.eq(currency) && key.2.eq(oracle_id)
+        })
+        .map(|((token, currency, oracle_id, height, txid), feed)| {
             let amount = Decimal::from(feed.amount) / Decimal::from(COIN);
-            oracle_price_feeds.push(OraclePriceFeedResponse {
-                id: format!("{}-{}-{}-{}", token, currency, oracle_id, feed.txid),
+            OraclePriceFeedResponse {
+                id: format!("{}-{}-{}-{}", token, currency, oracle_id, txid),
                 key: format!("{}-{}-{}", token, currency, oracle_id),
-                sort: hex::encode(feed.block.height.to_string() + &feed.txid.to_string()),
-                token: token.to_owned(),
-                currency: currency.to_owned(),
-                oracle_id: oracle_id.to_owned(),
-                txid: feed.txid,
+                sort: hex::encode(u32::from_be_bytes(height).to_string() + &txid.to_string()),
+                token,
+                currency,
+                oracle_id,
+                txid,
                 time: feed.time,
                 amount: amount.normalize().to_string(),
                 block: feed.block.clone(),
-            });
-        }
-    }
+            }
+        })
+        .collect::<Vec<_>>();
 
     Ok(ApiPagedResponse::of(
         oracle_price_feeds,

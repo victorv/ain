@@ -67,6 +67,7 @@
 #include <wallet/wallet.h>
 #include <ffi/ffihelpers.h>
 #include <ffi/ffiexports.h>
+#include <ocean.h>
 
 #include <condition_variable>
 #include <cstdint>
@@ -1053,8 +1054,6 @@ void InitLogging()
     version_string += " (release build)";
 #endif
     LogPrintf(PACKAGE_NAME " version %s\n", version_string);
-    // Remove ports.lock on startup in case of an unclean shutdown.
-    RemovePortUsage();
 }
 
 namespace { // Variables internal to initialization process only
@@ -1751,21 +1750,6 @@ void SetupInterrupts() {
     fInterrupt = SetupInterruptArg("-interrupt-block", fInterruptBlockHash, fInterruptBlockHeight);
 }
 
-bool OceanIndex (const UniValue b) {
-    CrossBoundaryResult result;
-    ocean_index_block(result, b.write());
-    if (!result.ok) {
-        LogPrintf("Error indexing genesis block: %s\n", result.reason);
-        ocean_invalidate_block(result, b.write());
-        if (!result.ok) {
-            LogPrintf("Error invalidating genesis block: %s\n", result.reason);
-            return false;
-        }
-        OceanIndex(b);
-    }
-    return true;
-};
-
 bool AppInitMain(InitInterfaces& interfaces)
 {
     const CChainParams& chainparams = Params();
@@ -1828,6 +1812,9 @@ bool AppInitMain(InitInterfaces& interfaces)
 #if ENABLE_ZMQ
     RegisterZMQRPCCommands(tableRPC);
 #endif
+
+    // Remove ports.lock on startup in case of an unclean shutdown.
+    RemovePortUsage();
 
     /* Start the RPC server already.  It will be started in "warmup" mode
      * and not really process calls already (but it will signify connections
@@ -2263,6 +2250,11 @@ bool AppInitMain(InitInterfaces& interfaces)
             }
         }
 
+        {
+            auto [hashHex, hashHexNoUndo, hashHexAccount] = GetDVMDBHashes(*pcustomcsview);
+            LogPrintf("Pre-consolidate rewards for DVM hash: %s hash-no-undo: %s hash-account: %s\n", hashHex, hashHexNoUndo, hashHexAccount);
+        }
+
         if (fullRewardConsolidation) {
             LogPrintf("Consolidate rewards for all addresses..\n");
 
@@ -2273,7 +2265,7 @@ bool AppInitMain(InitInterfaces& interfaces)
                 }
                 return true;
             });
-            ConsolidateRewards(*pcustomcsview, ::ChainActive().Height(), ownersToConsolidate, true);
+            ConsolidateRewards(*pcustomcsview, ::ChainActive().Height(), ownersToConsolidate, true, true);
         } else {
             //one set for all tokens, ConsolidateRewards runs on the address, so no need to run multiple times for multiple token inputs
             std::unordered_set<CScript, CScriptHasher> ownersToConsolidate;
@@ -2293,9 +2285,15 @@ bool AppInitMain(InitInterfaces& interfaces)
                     return true;
                 });
             }
-            ConsolidateRewards(*pcustomcsview, ::ChainActive().Height(), ownersToConsolidate, true);
+            ConsolidateRewards(*pcustomcsview, ::ChainActive().Height(), ownersToConsolidate, true, true);
         }
         pcustomcsview->Flush();
+        pcustomcsDB->Flush();
+
+        {
+            auto [hashHex, hashHexNoUndo, hashHexAccount] = GetDVMDBHashes(*pcustomcsview);
+            LogPrintf("Post-consolidate rewards for DVM hash: %s hash-no-undo: %s hash-account: %s\n", hashHex, hashHexNoUndo, hashHexAccount);
+        }
     }
 
     // ********************************************************* Step 12: import blocks
@@ -2498,20 +2496,27 @@ bool AppInitMain(InitInterfaces& interfaces)
 
     // ********************************************************* Step XX.a: create mocknet MN
     // MN: 0000000000000000000000000000000000000000000000000000000000000000
-    // Owner/Operator Address: df1qu04hcpd3untnm453mlkgc0g9mr9ap39lyx4ajc
-    // Owner/Operator Privkey: L5DhrVPhA2FbJ1ezpN3JijHVnnH1sVcbdcAcp3nE373ooGH6LEz6
 
     if (fMockNetwork && HasWallets()) {
+        // Mainnet: df1qmnv9c6jt9fmgmzvynp8r0gjm39awa027hsfzq3
+        // Test networks: tf1qmnv9c6jt9fmgmzvynp8r0gjm39awa027yqn3q4
+        const auto rawPrivKey = uint256S("4c0883a69102937d623414e5f791a5a5a4591d899d0e3a1b03f0b7421932b72e");
+        CKey key;
+        key.Set(rawPrivKey.begin(), rawPrivKey.end(), true);
+        const auto pubkey = key.GetPubKey();
+        const auto keyID = pubkey.GetID();
+        WitnessV0KeyHash dest(pubkey);
 
-        // Import privkey
-        const auto key = DecodeSecret("L5DhrVPhA2FbJ1ezpN3JijHVnnH1sVcbdcAcp3nE373ooGH6LEz6");
-        const auto keyID = key.GetPubKey().GetID();
-        const auto dest = WitnessV0KeyHash(PKHash{keyID});
-        const auto time{std::time(nullptr)};
+        {
+            auto pwallet = GetWallets()[0];
+            LOCK(pwallet->cs_wallet);
 
-        auto pwallet = GetWallets()[0];
-        pwallet->SetAddressBook(dest, "receive", "receive");
-        pwallet->ImportPrivKeys({{keyID, key}}, time);
+            pwallet->SetAddressBook(dest, "", "receive");
+            pwallet->ImportPrivKeys({{keyID, key}}, GetTime());
+        }
+
+        // Set operator for mining
+        gArgs.ForceSetArg("-masternode_operator", EncodeDestination(dest));
 
         // Create masternode
         CMasternode node;
@@ -2521,9 +2526,10 @@ bool AppInitMain(InitInterfaces& interfaces)
         node.operatorType = WitV0KeyHashType;
         node.operatorAuthAddress = keyID;
         node.version = CMasternode::VERSION0;
-        pcustomcsview->CreateMasternode(uint256S(std::string{64, '0'}), node, CMasternode::ZEROYEAR);
-        for (uint8_t i{0}; i < SUBNODE_COUNT; ++i) {
-            pcustomcsview->SetSubNodesBlockTime(node.operatorAuthAddress, chain_active_height, i, time);
+
+        {
+            LOCK(cs_main);
+            pcustomcsview->CreateMasternode(uint256S(std::string{64, '0'}), node, CMasternode::ZEROYEAR);
         }
     }
 
@@ -2552,14 +2558,19 @@ bool AppInitMain(InitInterfaces& interfaces)
 
         const UniValue b = blockToJSON(*pcustomcsview, block, tip, pblockindex, true, 2);
 
-        if (bool isIndexed = OceanIndex(b); !isIndexed) {
+        if (bool isIndexed = OceanIndex(b, 0); !isIndexed) {
             return false;
         }
 
         LogPrintf("WARNING: -expr-oceanarchive flag is turned on. This feature is not yet stable. Please do not use in production unless you're aware of the risks\n");
     }
 
-    // ********************************************************* Step 16: start minter thread
+    // ********************************************************* Step 16: start ocean catchup
+    if (!CatchupOceanIndexer()) {
+        return false;
+    }
+
+    // ********************************************************* Step 17: start minter thread
     if(gArgs.GetBoolArg("-gen", DEFAULT_GENERATE)) {
         if (!pos::StartStakingThreads(threadGroup)) {
             return false;

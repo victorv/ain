@@ -51,6 +51,8 @@ CAmount GetProposalCreationFee(int height, const CCustomCSView &view, const CCre
 // Missing call fixed in: https://github.com/DeFiCh/ain/pull/1766
 void CalcMissingRewardTempFix(CCustomCSView &mnview, const uint32_t targetHeight, const CWallet &wallet);
 
+std::tuple<std::string, std::string, std::string> GetDVMDBHashes(CCustomCSView &view);
+
 enum class UpdateMasternodeType : uint8_t {
     None = 0x00,
     OwnerAddress = 0x01,
@@ -581,7 +583,7 @@ public:
 
     bool CanSpend(const uint256 &txId, int height) const;
 
-    bool CalculateOwnerRewards(const CScript &owner, uint32_t height);
+    bool CalculateOwnerRewards(const CScript &owner, const uint32_t height, const bool skipStatic = false);
 
     ResVal<CAmount> GetAmountInCurrency(CAmount amount,
                                         CTokenCurrencyPair priceFeedId,

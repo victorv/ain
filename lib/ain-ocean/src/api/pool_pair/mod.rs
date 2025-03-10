@@ -79,7 +79,7 @@ impl PoolSwapVerboseResponse {
         Self {
             id: format!("{}-{}", v.pool_id, v.txid),
             sort: format!(
-                "{}{}",
+                "{}-{}",
                 hex::encode(v.block.height.to_be_bytes()),
                 hex::encode(v.txno.to_be_bytes()),
             ),
@@ -434,9 +434,9 @@ async fn list_pool_swaps_verbose(
             _ => true,
         })
         .map(|item| async {
-            let (_, swap) = item?;
+            let (key, swap) = item?;
             let from = find_swap_from(&ctx, &swap).await?;
-            let to = find_swap_to(&ctx, &swap).await?;
+            let to = find_swap_to(&ctx, &key, &swap).await?;
 
             let swap_type = check_swap_type(&ctx, &swap).await?;
 

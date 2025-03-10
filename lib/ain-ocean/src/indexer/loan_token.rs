@@ -1,6 +1,6 @@
-use std::{str::FromStr, sync::Arc};
+use std::{collections::HashSet, str::FromStr, sync::Arc};
 
-use ain_dftx::loans::SetLoanToken;
+use ain_dftx::{loans::SetLoanToken, Currency, Token};
 use log::trace;
 use rust_decimal::{prelude::Zero, Decimal};
 use rust_decimal_macros::dec;
@@ -25,7 +25,7 @@ impl Index for SetLoanToken {
         let ticker_id = (
             self.currency_pair.token.clone(),
             self.currency_pair.currency.clone(),
-            context.block.height,
+            context.block.height.to_be_bytes(),
         );
         services.oracle_price_active.by_id.delete(&ticker_id)?;
         Ok(())
@@ -42,7 +42,7 @@ fn is_aggregate_valid(aggregate: &OraclePriceAggregated, block: &BlockContext) -
         return false;
     }
 
-    if aggregate.aggregated.weightage == dec!(0) {
+    if aggregate.aggregated.weightage <= dec!(0) {
         return false;
     }
 
@@ -86,15 +86,18 @@ pub fn index_active_price(services: &Arc<Services>, block: &BlockContext) -> Res
         _ => 120,
     };
     if block.height % block_interval == 0 {
-        let price_tickers = services
+        let pairs = services
             .price_ticker
             .by_id
             .list(None, SortOrder::Descending)?
-            .flatten()
-            .collect::<Vec<_>>();
+            .filter_map(|item| {
+                item.ok()
+                    .map(|((_, _, token, currency), _)| (token, currency))
+            })
+            .collect::<HashSet<(Token, Currency)>>();
 
-        for pt in price_tickers {
-            perform_active_price_tick(services, pt.0, block)?;
+        for (token, currency) in pairs {
+            perform_active_price_tick(services, (token, currency), block)?;
         }
     }
     Ok(())
@@ -102,9 +105,8 @@ pub fn index_active_price(services: &Arc<Services>, block: &BlockContext) -> Res
 
 fn map_active_price(
     block: &BlockContext,
-    ticker_id: (String, String),
     aggregated_price: OraclePriceAggregated,
-    prev_price: OraclePriceActive,
+    prev_price: Option<OraclePriceActive>,
 ) -> OraclePriceActive {
     let next_price = if is_aggregate_valid(&aggregated_price, block) {
         Some(aggregated_price.aggregated)
@@ -112,16 +114,17 @@ fn map_active_price(
         None
     };
 
-    let active_price = if let Some(next) = prev_price.next {
-        Some(next)
+    let active_price = if let Some(prev_price) = prev_price {
+        if let Some(next) = prev_price.next {
+            Some(next)
+        } else {
+            prev_price.active
+        }
     } else {
-        prev_price.active
+        None
     };
 
     OraclePriceActive {
-        id: (ticker_id.0.clone(), ticker_id.1.clone(), block.height),
-        key: ticker_id,
-        sort: hex::encode(block.height.to_be_bytes()),
         active: active_price.clone(),
         next: next_price.clone(),
         is_live: is_live(active_price, next_price),
@@ -136,20 +139,28 @@ pub fn invalidate_active_price(services: &Arc<Services>, block: &BlockContext) -
         _ => 120,
     };
     if block.height % block_interval == 0 {
-        let price_tickers = services
+        let pairs = services
             .price_ticker
             .by_id
             .list(None, SortOrder::Descending)?
-            .flatten()
-            .collect::<Vec<_>>();
+            .filter_map(|item| {
+                item.ok()
+                    .map(|((_, _, token, currency), _)| (token, currency))
+            })
+            .collect::<HashSet<(Token, Currency)>>();
 
-        for pt in price_tickers {
-            let token = pt.0 .0;
-            let currency = pt.0 .1;
-            services
-                .oracle_price_active
-                .by_id
-                .delete(&(token, currency, block.height))?;
+        // convert to vector to reverse the hashset is required
+        let mut rev_pairs = Vec::new();
+        for pair in pairs {
+            rev_pairs.insert(0, pair);
+        }
+
+        for (token, currency) in rev_pairs {
+            services.oracle_price_active.by_id.delete(&(
+                token,
+                currency,
+                block.height.to_be_bytes(),
+            ))?;
         }
     }
 
@@ -158,58 +169,53 @@ pub fn invalidate_active_price(services: &Arc<Services>, block: &BlockContext) -
 
 pub fn perform_active_price_tick(
     services: &Arc<Services>,
-    ticker_id: (String, String),
+    ticker_id: (Token, Currency),
     block: &BlockContext,
 ) -> Result<()> {
-    let repo = &services.oracle_price_aggregated;
-    let prev_keys = repo
-        .by_key
-        .list(Some(ticker_id.clone()), SortOrder::Descending)?
-        .take(1)
-        .flatten() // return empty vec if none
-        .collect::<Vec<_>>();
+    let id = (
+        ticker_id.0.clone(),
+        ticker_id.1.clone(),
+        [0xffu8; 8],
+        [0xffu8; 4],
+    );
 
-    if prev_keys.is_empty() {
-        return Ok(());
-    }
+    let prev = services
+        .oracle_price_aggregated
+        .by_id
+        .list(Some(id.clone()), SortOrder::Descending)?
+        .take_while(|item| match item {
+            Ok((k, _)) => k.0 == id.0 && k.1 == id.1,
+            _ => true,
+        })
+        .next()
+        .transpose()?;
 
-    let Some((_, prev_id)) = prev_keys.first() else {
+    let Some((_, aggregated_price)) = prev else {
         return Ok(());
     };
 
-    let aggregated_price = repo.by_id.get(prev_id)?;
-
-    let Some(aggregated_price) = aggregated_price else {
-        return Ok(());
-    };
-
+    let id = (ticker_id.0, ticker_id.1, [0xffu8; 4]);
     let repo = &services.oracle_price_active;
-    let prev_keys = repo
-        .by_key
-        .list(Some(ticker_id.clone()), SortOrder::Descending)?
-        .take(1)
-        .flatten()
-        .collect::<Vec<_>>();
+    let prev = repo
+        .by_id
+        .list(Some(id.clone()), SortOrder::Descending)?
+        .take_while(|item| match item {
+            Ok((k, _)) => k.0 == id.0 && k.1 == id.1,
+            _ => true,
+        })
+        .next()
+        .transpose()?;
 
-    if prev_keys.is_empty() {
-        return Ok(());
-    }
-
-    let Some((_, prev_id)) = prev_keys.first() else {
-        return Ok(());
+    let prev_price = if let Some((_, prev)) = prev {
+        Some(prev)
+    } else {
+        None
     };
 
-    let prev_price = repo.by_id.get(prev_id)?;
+    let active_price = map_active_price(block, aggregated_price, prev_price);
 
-    let Some(prev_price) = prev_price else {
-        return Ok(());
-    };
-
-    let active_price = map_active_price(block, ticker_id, aggregated_price, prev_price);
-
-    repo.by_id.put(&active_price.id, &active_price)?;
-
-    repo.by_key.put(&active_price.key, &active_price.id)?;
+    repo.by_id
+        .put(&(id.0, id.1, block.height.to_be_bytes()), &active_price)?;
 
     Ok(())
 }

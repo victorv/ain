@@ -165,6 +165,7 @@ const CLogCategoryDesc LogCategories[] =
     {BCLog::CONNECT, "connect"},
     {BCLog::OCEAN, "ocean"},
     {BCLog::ICXBUG, "icxbug"},
+    {BCLog::ACCOUNTCONSOLIDATE, "accountconsolidate"},
     {BCLog::ALL, "1"},
     {BCLog::ALL, "all"},
 };
@@ -348,7 +349,7 @@ static std::string GetAutoPortString(const AutoPort type)
 
 uint16_t GetPortFromLockFile(const AutoPort type)
 {
-    const fs::path lockFilePath = GetDataDir() / "ports.lock";
+    const fs::path lockFilePath = GetDataDir(true) / "ports.lock";
     const std::string portTypeStr = GetAutoPortString(type);
 
     std::ifstream lockFile(lockFilePath);
@@ -376,7 +377,7 @@ void SetPortToLockFile(const AutoPort portType, const uint16_t portNumber)
         return;
     }
 
-    const fs::path lockFilePath = GetDataDir() / "ports.lock";
+    const fs::path lockFilePath = GetDataDir(true) / "ports.lock";
 
     std::ofstream lockFile(lockFilePath, std::ios_base::app);
     if (!lockFile.is_open()) {
@@ -389,7 +390,7 @@ void SetPortToLockFile(const AutoPort portType, const uint16_t portNumber)
 
 void RemovePortUsage()
 {
-    const fs::path lockFilePath = GetDataDir() / "ports.lock";
+    const fs::path lockFilePath = GetDataDir(true) / "ports.lock";
 
     // Remove the file. Ignore errors, file might not be present.
     std::error_code ec;

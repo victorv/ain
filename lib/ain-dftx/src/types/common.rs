@@ -4,8 +4,9 @@ use bitcoin::{
     consensus::{Decodable, Encodable},
     io::{self, ErrorKind},
 };
+use serde::Serialize;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct CompactVec<T>(Vec<T>);
 
 impl<T: Encodable + std::fmt::Debug> Encodable for CompactVec<T> {
@@ -46,7 +47,7 @@ impl<T> AsRef<Vec<T>> for CompactVec<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Maybe<T>(pub Option<T>);
 impl<T: Encodable + std::fmt::Debug> Encodable for Maybe<T> {
     fn consensus_encode<W: bitcoin::io::Write + ?Sized>(
@@ -82,7 +83,7 @@ impl<T> From<Option<T>> for Maybe<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct RawBytes(pub Vec<u8>);
 
 impl Encodable for RawBytes {
@@ -98,7 +99,7 @@ impl Decodable for RawBytes {
     fn consensus_decode<R: bitcoin::io::Read + ?Sized>(
         reader: &mut R,
     ) -> Result<Self, bitcoin::consensus::encode::Error> {
-        let mut buf = [0u8; 512];
+        let mut buf = [0u8; 4096];
         let v = reader.read(&mut buf)?;
         Ok(Self(buf[..v].to_vec()))
     }
@@ -110,7 +111,7 @@ impl Decodable for RawBytes {
 /// In the rust-bitcoin library, variable-length integers are implemented as CompactSize.
 /// See [issue #1016](https://github.com/rust-bitcoin/rust-bitcoin/issues/1016)
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize)]
 pub struct VarInt(pub u64);
 
 impl Encodable for VarInt {
